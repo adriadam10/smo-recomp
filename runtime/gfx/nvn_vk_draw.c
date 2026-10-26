@@ -1915,7 +1915,7 @@ static CB *cb_new(uint64_t addr, uint64_t size) {
         VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         VkMemoryRequirements rq;
         c->cap = (size + 4095) & ~(uint64_t)4095;
-        bi.size = c->cap; bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        bi.size = c->cap; bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         VKC(vkCreateBuffer(V.device, &bi, NULL, &c->buf));
         vkGetBufferMemoryRequirements(V.device, c->buf, &rq);
         VkFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | (g_cb_cached ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0);
@@ -2522,46 +2522,6 @@ static void vk_write_texels(void *arg) {
 /* CopyTextureToBuffer, ReadTexels: a region of one level to host memory, as the
  * OpenGL path's glGetTextureSubImage (tight rows, or the given row / image strides). Synchronous: the command buffer is
  * submitted and waited for (these calls are rare: replays, screenshots). Returns the bytes written, 0 when it stopped. */
-/* SMO_VK_ASYNC_TEXBUF=1 (experiment, off by default): a CopyTextureToBuffer recorded in a command list is a GPU copy
- * into a compute buffer (CB) of the destination range instead of a read on the CPU (read_region: a wait for the whole GPU
- * in the middle of the batch). cb_land puts the bytes into guest memory once that submission has finished, before the
- * next batch or the game's fence wait, and buf_ref takes them from the CB when this batch reads the range again. Only
- * the plain case: no conversion (scaled, decoded, expanded, multisample, depth-stencil), offsets the copy allows. */
-static LONG64 g_texbuf_async, g_texbuf_sync;
-static int texbuf_async(Tex *t, const View *vp, const int *r, uint64_t dst, int64_t row_stride, int64_t image_stride) {
-    static int on = -1;
-    if (on < 0) on = getenv("SMO_VK_ASYNC_TEXBUF") && atoi(getenv("SMO_VK_ASYNC_TEXBUF"));
-    VTex *vt = on ? vt_get(t) : NULL;
-    if (!vt || vt->decode || vt->expand || vt->samples > 1 || vt->rs || vt->bw != 1 || vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { g_texbuf_sync++; return 0; }
-    if (row_stride % vt->bpb || (row_stride && image_stride % row_stride)) { g_texbuf_sync++; return 0; }
-    int level = vp && (vp->set & 0x81) == 0x81 ? vp->lvl0 : 0, layer = vp && (vp->set & 0x82) == 0x82 ? vp->lay0 : 0, depth = r[5] > 0 ? r[5] : 1;
-    uint64_t rowlen = row_stride ? (uint64_t)(row_stride / vt->bpb) : 0, rows = image_stride && row_stride ? (uint64_t)(image_stride / row_stride) : 0;
-    uint64_t size = (rowlen ? rowlen : (uint64_t)r[3]) * (rows ? rows : (uint64_t)r[4]) * vt->bpb * (uint64_t)depth;
-    if (!size) return 1;
-    CB *c = cb_inside(dst, size);
-    if (!c && cb_overlap(dst, size)) { g_texbuf_sync++; return 0; }
-    if (!c) c = cb_new(dst, size);
-    uint64_t off = dst - c->addr;
-    if (off % 4 || off % vt->bpb) { g_texbuf_sync++; return 0; }      /* a fresh CB starts at dst: only a CB found above can fail this */
-    pass_end(); cmd_begin();
-    VkImageLayout was = vt->layout;
-    vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    VkBufferImageCopy cp;
-    memset(&cp, 0, sizeof cp);
-    cp.bufferOffset = off; cp.bufferRowLength = (uint32_t)rowlen; cp.bufferImageHeight = (uint32_t)rows;
-    cp.imageSubresource.aspectMask = vt->aspect; cp.imageSubresource.mipLevel = (uint32_t)level; cp.imageSubresource.baseArrayLayer = vt->is3d ? 0 : (uint32_t)(layer + r[2]); cp.imageSubresource.layerCount = vt->is3d ? 1 : (uint32_t)depth;
-    cp.imageOffset.x = r[0]; cp.imageOffset.y = r[1]; cp.imageOffset.z = vt->is3d ? r[2] : 0;
-    cp.imageExtent.width = (uint32_t)r[3]; cp.imageExtent.height = (uint32_t)r[4]; cp.imageExtent.depth = (uint32_t)(vt->is3d ? depth : 1);
-    vkCmdCopyImageToBuffer(R.cmd, vt->img, LAYOUT(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL), c->buf, 1, &cp);
-    if (was != VK_IMAGE_LAYOUT_UNDEFINED) vt_layout(vt, was);
-    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};      /* later commands of this batch may read the CB (buf_ref) */
-    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    c->dirty = 1;
-    g_texbuf_async++;
-    return 1;
-}
 static size_t read_region(Tex *t, const View *vp, const int *r, void *out, int64_t row_stride, int64_t image_stride) {
     VTex *vt = vt_get(t);
     if (vt->decode || vt->expand || vt->samples > 1) { nvn_vk_missing("ReadTexels / CopyTextureToBuffer of an ASTC-decoded, 3-component or multisample texture"); return 0; }
@@ -3056,7 +3016,6 @@ static void exec(const Cmd *m, int depth) {
         int r[6];
         if (!t || t->dead || !a[3]) break;
         memcpy(&v, blob, sizeof v); memcpy(r, blob + 24, 24);
-        if (texbuf_async(t, &v, r, a[3], R.row_stride, R.image_stride)) break;
         cb_sync();
         read_region(t, &v, r, P(a[3]), R.row_stride, R.image_stride);
         GEN_BUMP(GEN_TEXBUF);                      /* guest memory changed: ranges are streamed again */
@@ -3918,7 +3877,6 @@ static void vkd_shutdown(void) {
         printf("nvn_vk_syncwait: compute copy-back syncs by the line of nvn_vk_draw.c that asked:");
         for (int i = 0; i < g_cbs_n; i++) printf(" L%d %lld (%.0f ms)", g_cbs_at[i].line, (long long)g_cbs_at[i].n, (double)g_cbs_at[i].tk * k);
         printf("\n");
-        printf("nvn_vk_texbuf: CopyTextureToBuffer in command lists: %lld as GPU copies into a compute buffer, %lld read on the CPU (SMO_VK_ASYNC_TEXBUF=1: the first kind)\n", (long long)g_texbuf_async, (long long)g_texbuf_sync);
         printf("nvn_vk_syncwait: the render thread's own waits: a command buffer slot still busy %lld times, %.0f ms; wait for everything %lld times, %.0f ms; compute copy-back syncs %lld, %.0f ms\n",
                (long long)g_reuse_n, (double)g_reuse_tk * k, (long long)g_waitall_n, (double)g_waitall_tk * k, (long long)R.cb_waits, (double)R.cb_wait_ticks * k);
         printf("nvn_vk_fl: format lists %s: %lld render targets with one (%lld of them not mutable: no sRGB / UNORM twin), %lld views given the image's own format\n", fl_on() ? "on" : "off (SMO_VK_FORMAT_LIST=1 turns them on)", (long long)g_fl_images, (long long)g_fl_fixed, (long long)g_fl_refused);
