@@ -1895,6 +1895,25 @@ static void cb_batch_end(void) {
  * state 1 sets g_cb_live to 0). Every range a draw reads is looked up here while compute results are live, about 10,000
  * a frame: walking the 256 slots for the dozen CBs of a frame cost 0.5-0.7 ms a frame once they stayed live longer. */
 static int16_t g_cb_live_list[CB_MAX];
+/* SMO_VK_CB_CARRY=1 (experiment): at the start of a batch, the compute buffers of the batch before whose submission has
+ * not finished stay bound for this one (state 1 again: buf_ref binds them, a range that only partly lies in one still
+ * syncs) instead of the render thread waiting for the GPU to copy them back (cb_sync). A barrier makes what compute and
+ * copies wrote before visible to this batch's reads. They are copied back when this batch's submission has finished. */
+static LONG64 g_cb_carried;
+static int cb_carry_on(void) { static int on = -1; if (on < 0) on = getenv("SMO_VK_CB_CARRY") && atoi(getenv("SMO_VK_CB_CARRY")); return on; }
+static void cb_carry(void) {
+    cb_poll();                                     /* finished already: copied back as before */
+    if (!g_cb_pending) return;
+    int n = 0;
+    for (int i = 0; i < g_cb_used; i++) if (g_cb[i].state == 2) { g_cb[i].state = 1; g_cb_live_list[n++] = (int16_t)i; }
+    g_cb_live = n; g_cb_pending = 0; g_cb_carried++;
+    cmd_begin();
+    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                       VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
 static CB *cb_inside(uint64_t addr, uint64_t size) {
     for (int k = 0; k < g_cb_live; k++) { CB *c = &g_cb[g_cb_live_list[k]]; if (c->state == 1 && addr >= c->addr && addr + size <= c->addr + c->size) return c; }
     return NULL;
@@ -3095,6 +3114,7 @@ static void vk_submit(void *arg) {
     if (!V.alive) return;                          /* after the shutdown at exit: the device is gone */
     prewarm_wait();
     LONG64 t0 = tk();
+    if (cb_carry_on()) cb_carry(); else
     cb_sync();                                     /* what the last batch's dispatches wrote is in guest memory before this batch reads it */
     if (g_occ_qn) occ_resolve(0);                  /* occlusion counts whose submissions have finished */
     LONG64 t1 = tk();
@@ -3899,6 +3919,7 @@ static void vkd_shutdown(void) {
         double k = 1000.0 / (double)fq.QuadPart;
         printf("nvn_vk_syncwait: the game's fence waits that found the GPU busy: %lld, %.0f ms in all; submissions after the fence waited for: 0: %lld, 1: %lld, 2: %lld, 3 or more: %lld\n",
                (long long)g_sw_n, (double)g_sw_tk * k, (long long)g_sw_lag[0], (long long)g_sw_lag[1], (long long)g_sw_lag[2], (long long)g_sw_lag[3]);
+        printf("nvn_vk_syncwait: batches that kept the last batch's compute buffers bound instead of waiting (SMO_VK_CB_CARRY=1): %lld\n", (long long)g_cb_carried);
         printf("nvn_vk_syncwait: game fence waits answered with the previous wait's fence (SMO_VK_FENCE_LATE=1): %lld\n", (long long)g_late_n);
         printf("nvn_vk_syncwait: timestamp reports deferred to the end of their submission (SMO_VK_REPORT_DEFER=1): %lld\n", (long long)g_rep_deferred);
         printf("nvn_vk_syncwait: compute copy-back syncs by the line of nvn_vk_draw.c that asked:");
