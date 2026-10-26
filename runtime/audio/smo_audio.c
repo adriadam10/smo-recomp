@@ -183,7 +183,7 @@ static int16_t g_wbuf[SINK_NBLK][SINK_BLOCK * 2];
 static int g_wcur, g_wfill, g_wopen = -1, g_wstarted;
 static LONG64 g_sink_frames, g_sink_blocks, g_sink_dropped, g_sink_underruns;
 static uint32_t g_sink_peak, g_in_peak[6];
-static LONG64 g_sink_clipped;
+static LONG64 g_sink_clipped, g_q_sum, g_q_n, g_q_max;     /* g_q_*: SDL3 output queue before each block (bytes, 4 a frame) */
 static LONG64 g_sink_first_sound = -1;          /* the first sink frame (5 ms each) with a non-zero sample: a silent start shows here */                    /* output samples that went past 16 bits and were clamped (the downmix can add up past full scale) */
 static FILE *g_wav;                               /* SMO_AUDIO_WAV=<file>: what goes to the device, as a WAV file (header completed at exit) */
 static uint32_t g_wav_frames;
@@ -241,7 +241,8 @@ static void sink_open(void) {
 }
 static void sink_submit(void) {                   /* the block g_wcur is full */
 #ifndef _WIN32
-    int was_empty = SDL_GetAudioStreamQueued(g_stream) == 0;
+    int queued = SDL_GetAudioStreamQueued(g_stream), was_empty = queued == 0;
+    if (g_wstarted && queued > 0) { g_q_sum += queued; g_q_n++; if (queued > g_q_max) g_q_max = queued; }      /* bytes still to play: the output latency */
     SDL_PutAudioStreamData(g_stream, g_wbuf[g_wcur], SINK_BLOCK * 4);
     g_sink_blocks++;
     if (!g_wstarted && g_sink_blocks >= 3) { SDL_ResumeAudioStreamDevice(g_stream); g_wstarted = 1; }    /* 120 ms queued before playing */
@@ -475,6 +476,7 @@ void smo_audio_report(FILE *out) {
             g_nsys, (long long)g_frames, (long long)g_lists, (long long)g_commands_bytes);
     fprintf(out, "audio: device sink: %lld frames output, %lld blocks of 40 ms queued, %lld samples dropped (device behind), %lld underruns (device waited), peak level %u of 32767\n",
             (long long)g_sink_frames, (long long)g_sink_blocks, (long long)g_sink_dropped, (long long)g_sink_underruns, g_sink_peak);
+    if (g_q_n) fprintf(out, "audio: device sink: output queue before each block: mean %.0f ms, largest %.0f ms\n", (double)g_q_sum / g_q_n / 192.0, (double)g_q_max / 192.0);
     fprintf(out, "audio: device sink: first sound at sink frame %lld (%.2f s)\n", (long long)g_sink_first_sound, g_sink_first_sound * 0.005);
     fprintf(out, "audio: device sink: %lld output samples clamped to 16 bits; input channel peaks %u %u %u %u %u %u (6 channels: FL FR FC LFE BL BR)\n",
             (long long)g_sink_clipped, g_in_peak[0], g_in_peak[1], g_in_peak[2], g_in_peak[3], g_in_peak[4], g_in_peak[5]);
