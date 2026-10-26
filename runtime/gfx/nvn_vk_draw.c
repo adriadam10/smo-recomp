@@ -40,6 +40,7 @@ static PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2;
 static PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
 static PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties;
 static PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
+static PFN_vkGetCalibratedTimestampsKHR vkGetCalibratedTimestamps;      /* KHR or EXT (the same call); NULL without either */
 #define VKC(call) do { VkResult r_ = (call); if (r_ != VK_SUCCESS) vk_fatal(#call, r_); } while (0)
 
 static struct {
@@ -52,6 +53,7 @@ static struct {
     const char *exts[16]; uint32_t next;
     int has_vids, has_cbc, has_pv, has_iu8, has_plr, has_vad, has_push, has_eds3, debug;
     int has_gpl, ext_gpl, ext_so;
+    int cal;                                       /* calibrated timestamps: 1 VK_KHR_, 2 VK_EXT_, 0 none (report times, rep_gpu_time) */
     int has_dcc;                                   /* VK_EXT_depth_clip_control (NVN depth mode NEAR_IS_MINUS_W) */
     VkPhysicalDeviceMemoryProperties mp;
 } D;
@@ -109,6 +111,8 @@ static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties 
     if (D.ext_gpl && vk_gpl_mode()) { D.exts[D.next++] = "VK_KHR_pipeline_library"; EXT(has_gpl, "VK_EXT_graphics_pipeline_library", gpl, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT) }
 #undef EXT
     if (has_name(dext, ndext, "VK_KHR_push_descriptor") && !(getenv("SMO_VK_PUSH") && !atoi(getenv("SMO_VK_PUSH")))) { D.has_push = 1; D.exts[D.next++] = "VK_KHR_push_descriptor"; }
+    if (has_name(dext, ndext, "VK_KHR_calibrated_timestamps")) { D.cal = 1; D.exts[D.next++] = "VK_KHR_calibrated_timestamps"; }
+    else if (has_name(dext, ndext, "VK_EXT_calibrated_timestamps")) { D.cal = 2; D.exts[D.next++] = "VK_EXT_calibrated_timestamps"; }
     vkGetPhysicalDeviceFeatures2(V.gpu, &D.f2);                    /* every supported feature of these structures is enabled */
     D.has_vids = D.has_vids && D.vids.vertexInputDynamicState; D.has_cbc = D.has_cbc && D.cbc.customBorderColors && D.cbc.customBorderColorWithoutFormat;
     D.has_pv = D.has_pv && D.pv.provokingVertexLast; D.has_iu8 = D.has_iu8 && D.iu8.indexTypeUint8; D.has_plr = D.has_plr && D.plr.primitiveTopologyListRestart;
@@ -1653,7 +1657,59 @@ static void cb_land(int midbatch) {                /* the GPU has finished every
  * its submission has finished and the compute results recorded before it are in guest memory, instead of submitting and
  * waiting for the GPU right there (cb_sync: about 11 ms each, 2,783 times in a Cap Kingdom run). The game reads a report
  * after its fence, and the fence wait lands what is due (vk_sync_wait_). Reports land in the order they were recorded. */
-static struct { uint64_t addr, serial; uint32_t epoch; int need_cb; } g_rep[512];
+static struct { uint64_t addr, serial; uint32_t epoch; int need_cb, q; } g_rep[512];      /* q: its GPU time is in g_rep_pool's query of the same index */
+/* The time a deferred report gets: the GPU's own clock where the report stands in the commands (a timestamp query,
+ * bottom of pipe: when the work before it has finished), in the time base of QueryPerformanceCounter, which
+ * nvnDeviceGetCurrentTimestampInNanoseconds also uses. The game drives its dynamic resolution from these times: a report
+ * written only when its submission is seen finished (later than the work ended) made it lower the resolution.
+ * Without calibrated timestamps or host query reset: the time of writing, as before. */
+static VkQueryPool g_rep_pool;
+static int g_rep_gpu = -1;
+static double g_cal_off_ns; static uint64_t g_cal_at;
+static int rep_gpu_on(void) {
+    if (g_rep_gpu >= 0) return g_rep_gpu;
+    g_rep_gpu = 0;
+    if (!vkGetCalibratedTimestamps || !D.f12.hostQueryReset || !V.props.limits.timestampComputeAndGraphics || (getenv("SMO_VK_REPORT_GPUTIME") && !atoi(getenv("SMO_VK_REPORT_GPUTIME")))) return 0;
+    VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = 512;
+    if (vkCreateQueryPool(V.device, &qi, NULL, &g_rep_pool) != VK_SUCCESS) return 0;
+    vkResetQueryPool(V.device, g_rep_pool, 0, 512);
+    return g_rep_gpu = 1;
+}
+static void rep_calibrate(void) {                  /* GPU clock -> QueryPerformanceCounter nanoseconds; again every half second (the clocks drift) */
+    uint64_t now = vk_now_ns();
+    if (g_cal_at && now - g_cal_at < 500000000ull) return;
+    VkCalibratedTimestampInfoKHR ci[2] = {{VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR}, {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR}};
+    ci[0].timeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
+#ifdef _WIN32
+    ci[1].timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+#else
+    ci[1].timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR;  /* the shim's QueryPerformanceCounter (win32_posix.c, CLOCK_UPTIME_RAW) */
+#endif
+    uint64_t ts[2], dev;
+    if (vkGetCalibratedTimestamps(V.device, 2, ci, ts, &dev) != VK_SUCCESS) { g_rep_gpu = 0; return; }
+#ifdef _WIN32
+    LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+    double host = (double)ts[1] * 1e9 / (double)f.QuadPart;
+#else
+    double host = (double)ts[1];
+#endif
+    g_cal_off_ns = host - (double)ts[0] * (double)V.props.limits.timestampPeriod;
+    g_cal_at = now;
+}
+static uint64_t g_q_wait[512];                   /* a query read before the GPU wrote it: reset only once that submission has finished */
+static uint64_t rep_time(int i) {                  /* the report's time: its query when the GPU has written it, else now */
+    uint64_t t = 0;
+    if (g_rep[i].q) {
+        g_rep[i].q = 0;
+        if (vkGetQueryPoolResults(V.device, g_rep_pool, (uint32_t)i, 1, sizeof t, &t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            vkResetQueryPool(V.device, g_rep_pool, (uint32_t)i, 1);
+            rep_calibrate();
+            if (g_rep_gpu) return (uint64_t)(g_cal_off_ns + (double)t * (double)V.props.limits.timestampPeriod);
+        } else g_q_wait[i] = g_rep[i].serial;
+    }
+    return vk_now_ns();
+}
 static int g_rep_head, g_rep_n;
 static LONG64 g_rep_deferred;
 static int rep_mode(void) { static int m = -1; if (m < 0) m = getenv("SMO_VK_REPORT_DEFER") ? atoi(getenv("SMO_VK_REPORT_DEFER")) : 1; return m; }      /* 0 old way, 1 deferred, 2 (experiment) written at once without a wait */
@@ -1662,14 +1718,16 @@ static int rep_defer(uint64_t addr) {
     if (!rep_defer_on() || g_rep_n == 512) return 0;
     int i = (g_rep_head + g_rep_n++) % 512;
     g_rep[i].addr = addr; g_rep[i].serial = R.serial + 1;          /* the submission the commands recorded now go into */
-    g_rep[i].need_cb = g_cb_live || g_cb_pending; g_rep[i].epoch = g_cb_epoch;
+    g_rep[i].need_cb = g_cb_live || g_cb_pending; g_rep[i].epoch = g_cb_epoch; g_rep[i].q = 0;
+    if (g_q_wait[i] && R.done >= g_q_wait[i]) { vkResetQueryPool(V.device, g_rep_pool, (uint32_t)i, 1); g_q_wait[i] = 0; }
+    if (rep_gpu_on() && !g_q_wait[i]) { cmd_begin(); vkCmdWriteTimestamp(R.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_rep_pool, (uint32_t)i); g_rep[i].q = 1; }
     g_rep_deferred++;
     return 1;
 }
 static void rep_flush_to(uint64_t serial) {     /* a fence answered before its work ran (SMO_VK_FENCE_LATE): the game reads the reports recorded before it now, so they get the time now */
     while (g_rep_n && g_rep[g_rep_head].serial <= serial) {
         int i = g_rep_head;
-        uint64_t d[2] = {0, vk_now_ns()};
+        uint64_t d[2] = {0, rep_time(i)};
         memcpy(P(g_rep[i].addr), d, 16); host_wrote(g_rep[i].addr, 16, GEN_REPORT);
         g_rep_head = (g_rep_head + 1) % 512; g_rep_n--;
     }
@@ -1678,7 +1736,7 @@ static void rep_land(void) {
     while (g_rep_n) {
         int i = g_rep_head;
         if (R.done < g_rep[i].serial || (g_rep[i].need_cb && g_cb_epoch == g_rep[i].epoch)) return;      /* its work, or the copy-back of what that work wrote, is not done */
-        uint64_t d[2] = {0, vk_now_ns()};
+        uint64_t d[2] = {0, rep_time(i)};
         memcpy(P(g_rep[i].addr), d, 16); host_wrote(g_rep[i].addr, 16, GEN_REPORT);
         g_rep_head = (g_rep_head + 1) % 512; g_rep_n--;
     }
@@ -3849,6 +3907,7 @@ static void vkd_init(void) {
     VKD(X)
 #undef X
     vkCmdSetVertexInputEXT = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(V.device, "vkCmdSetVertexInputEXT");
+    if (D.cal) vkGetCalibratedTimestamps = (PFN_vkGetCalibratedTimestampsKHR)vkGetDeviceProcAddr(V.device, D.cal == 1 ? "vkGetCalibratedTimestampsKHR" : "vkGetCalibratedTimestampsEXT");
     if (D.has_push) { vkCmdPushDescriptorSetKHR = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(V.device, "vkCmdPushDescriptorSetKHR"); if (!vkCmdPushDescriptorSetKHR) D.has_push = 0; }
     if (D.has_eds3) {
 #define X3(n) n = (PFN_##n)vkGetDeviceProcAddr(V.device, #n); if (!n) vkd_fail("the device has VK_EXT_extended_dynamic_state3 but no " #n);
