@@ -335,7 +335,6 @@ static float g_fr_gpu[FRSTAT_N], g_fr_wall[FRSTAT_N];
 static uint8_t g_fr_play[FRSTAT_N];
 static LONG64 g_cur_frame, g_play_frames, g_scene_frames, g_frames_counted;      /* frames: play frames, frames with compute dispatches, all ("nvn_vk_frames:") */
 void nvn_tl(int ev, int arg);                     /* nvn_gl.c: SMO_FRAMETL (13/14: a wait for the GPU begins / ends) */
-static LONG64 g_reuse_n, g_reuse_tk, g_waitall_n, g_waitall_tk;      /* nvn_vk_syncwait: the render thread's own waits by cause */
 static void slot_wait(Slot *s) {
     if (!s->pending) return;
     LONG64 t0 = tk();
@@ -360,7 +359,7 @@ static void cmd_begin(void) {
     g_tset_gen++; g_tset_used = 0; g_tset_list_used = 0;
     R.cur = (R.cur + 1) % NSLOT;
     Slot *s = &R.slot[R.cur];
-    { LONG64 t0 = tk(); int busy = s->pending; slot_wait(s); if (busy) { g_reuse_n++; g_reuse_tk += tk() - t0; } }
+    slot_wait(s);
     for (int i = 0; i < s->npool; i++) VKC(vkResetDescriptorPool(V.device, s->pool[i], 0));
     s->ipool = 0;
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -396,7 +395,7 @@ static uint64_t cmd_submit(VkSemaphore wait, VkSemaphore signal) {
     R.recording = 0; R.cmd = NULL; R.flushes++;
     return R.serial;
 }
-static void cmd_wait_all(void) { LONG64 t0 = tk(); cmd_submit(NULL, NULL); for (int i = 0; i < NSLOT; i++) slot_wait(&R.slot[i]); R.done = R.serial; g_waitall_n++; g_waitall_tk += tk() - t0; }
+static void cmd_wait_all(void) { cmd_submit(NULL, NULL); for (int i = 0; i < NSLOT; i++) slot_wait(&R.slot[i]); R.done = R.serial; }
 
 /* ---------------------------------------------------------------- stream ring */
 #define RING_ALIGN 256
@@ -578,11 +577,12 @@ struct VTex {
  * (radv_are_formats_dcc_compatible): without a list every render target is uncompressed and every clear writes the whole
  * image. So a target lists its own format and its sRGB / UNORM twin (none: not mutable at all), as LAS Recomp 03ee802f
  * and Savage Wind #154; a view of any other format gets the image's own (logged). Not on storage images, which are bound
- * through views of other formats. On by default on integrated GPUs; SMO_VK_FORMAT_LIST=0 / 1 turns it off / on. */
+ * through views of other formats. On by default on AMD's integrated GPUs (where it was measured; nothing to gain on
+ * others, and not checked on Apple's); SMO_VK_FORMAT_LIST=0 / 1 turns it off / on. */
 static LONG64 g_fl_images, g_fl_fixed, g_fl_refused;
 static int fl_on(void) {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("SMO_VK_FORMAT_LIST"); on = e ? atoi(e) != 0 : V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU; }
+    if (on < 0) { const char *e = getenv("SMO_VK_FORMAT_LIST"); on = e ? atoi(e) != 0 : V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && V.props.vendorID == 0x1002; }
     return on;
 }
 static VkFormat srgb_twin(VkFormat f) {
@@ -1879,7 +1879,7 @@ static CB *cb_new(uint64_t addr, uint64_t size) {
         VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         VkMemoryRequirements rq;
         c->cap = (size + 4095) & ~(uint64_t)4095;
-        bi.size = c->cap; bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        bi.size = c->cap; bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         VKC(vkCreateBuffer(V.device, &bi, NULL, &c->buf));
         vkGetBufferMemoryRequirements(V.device, c->buf, &rq);
         VkFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | (g_cb_cached ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0);
@@ -2486,46 +2486,6 @@ static void vk_write_texels(void *arg) {
 /* CopyTextureToBuffer, ReadTexels: a region of one level to host memory, as the
  * OpenGL path's glGetTextureSubImage (tight rows, or the given row / image strides). Synchronous: the command buffer is
  * submitted and waited for (these calls are rare: replays, screenshots). Returns the bytes written, 0 when it stopped. */
-/* SMO_VK_ASYNC_TEXBUF=1 (experiment, off by default): a CopyTextureToBuffer recorded in a command list is a GPU copy
- * into a compute buffer (CB) of the destination range instead of a read on the CPU (read_region: a wait for the whole GPU
- * in the middle of the batch). cb_land puts the bytes into guest memory once that submission has finished, before the
- * next batch or the game's fence wait, and buf_ref takes them from the CB when this batch reads the range again. Only
- * the plain case: no conversion (scaled, decoded, expanded, multisample, depth-stencil), offsets the copy allows. */
-static LONG64 g_texbuf_async, g_texbuf_sync;
-static int texbuf_async(Tex *t, const View *vp, const int *r, uint64_t dst, int64_t row_stride, int64_t image_stride) {
-    static int on = -1;
-    if (on < 0) on = getenv("SMO_VK_ASYNC_TEXBUF") && atoi(getenv("SMO_VK_ASYNC_TEXBUF"));
-    VTex *vt = on ? vt_get(t) : NULL;
-    if (!vt || vt->decode || vt->expand || vt->samples > 1 || vt->rs || vt->bw != 1 || vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { g_texbuf_sync++; return 0; }
-    if (row_stride % vt->bpb || (row_stride && image_stride % row_stride)) { g_texbuf_sync++; return 0; }
-    int level = vp && (vp->set & 0x81) == 0x81 ? vp->lvl0 : 0, layer = vp && (vp->set & 0x82) == 0x82 ? vp->lay0 : 0, depth = r[5] > 0 ? r[5] : 1;
-    uint64_t rowlen = row_stride ? (uint64_t)(row_stride / vt->bpb) : 0, rows = image_stride && row_stride ? (uint64_t)(image_stride / row_stride) : 0;
-    uint64_t size = (rowlen ? rowlen : (uint64_t)r[3]) * (rows ? rows : (uint64_t)r[4]) * vt->bpb * (uint64_t)depth;
-    if (!size) return 1;
-    CB *c = cb_inside(dst, size);
-    if (!c && cb_overlap(dst, size)) { g_texbuf_sync++; return 0; }
-    if (!c) c = cb_new(dst, size);
-    uint64_t off = dst - c->addr;
-    if (off % 4 || off % vt->bpb) { g_texbuf_sync++; return 0; }      /* a fresh CB starts at dst: only a CB found above can fail this */
-    pass_end(); cmd_begin();
-    VkImageLayout was = vt->layout;
-    vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    VkBufferImageCopy cp;
-    memset(&cp, 0, sizeof cp);
-    cp.bufferOffset = off; cp.bufferRowLength = (uint32_t)rowlen; cp.bufferImageHeight = (uint32_t)rows;
-    cp.imageSubresource.aspectMask = vt->aspect; cp.imageSubresource.mipLevel = (uint32_t)level; cp.imageSubresource.baseArrayLayer = vt->is3d ? 0 : (uint32_t)(layer + r[2]); cp.imageSubresource.layerCount = vt->is3d ? 1 : (uint32_t)depth;
-    cp.imageOffset.x = r[0]; cp.imageOffset.y = r[1]; cp.imageOffset.z = vt->is3d ? r[2] : 0;
-    cp.imageExtent.width = (uint32_t)r[3]; cp.imageExtent.height = (uint32_t)r[4]; cp.imageExtent.depth = (uint32_t)(vt->is3d ? depth : 1);
-    vkCmdCopyImageToBuffer(R.cmd, vt->img, LAYOUT(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL), c->buf, 1, &cp);
-    if (was != VK_IMAGE_LAYOUT_UNDEFINED) vt_layout(vt, was);
-    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};      /* later commands of this batch may read the CB (buf_ref) */
-    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    c->dirty = 1;
-    g_texbuf_async++;
-    return 1;
-}
 static size_t read_region(Tex *t, const View *vp, const int *r, void *out, int64_t row_stride, int64_t image_stride) {
     VTex *vt = vt_get(t);
     if (vt->decode || vt->expand || vt->samples > 1) { nvn_vk_missing("ReadTexels / CopyTextureToBuffer of an ASTC-decoded, 3-component or multisample texture"); return 0; }
@@ -3019,7 +2979,6 @@ static void exec(const Cmd *m, int depth) {
         int r[6];
         if (!t || t->dead || !a[3]) break;
         memcpy(&v, blob, sizeof v); memcpy(r, blob + 24, 24);
-        if (texbuf_async(t, &v, r, a[3], R.row_stride, R.image_stride)) break;
         cb_sync();
         read_region(t, &v, r, P(a[3]), R.row_stride, R.image_stride);
         GEN_BUMP(GEN_TEXBUF);                      /* guest memory changed: ranges are streamed again */
@@ -3108,9 +3067,6 @@ static void vk_housekeeping(void *arg) { (void)arg; if (V.alive) nvn_front_take_
 static void vk_flush(void *arg) { (void)arg; if (V.alive) cmd_submit(NULL, NULL); }
 static void vk_finish(void *arg) { (void)arg; if (V.alive) { cmd_wait_all(); if (g_occ_qn) occ_resolve(0); } }
 static void vk_fence(void *arg) { SyncJob *j = arg; if (j->o->dead || !V.alive) return; j->o->s = (void *)(uintptr_t)(cmd_submit(NULL, NULL) + 1); }
-/* the game's own waits on its fences (nvnSyncWait) that found the GPU still busy: how long they waited, and how far the
- * fence was behind the newest submission (0: the game waits for everything it has submitted, so the GPU runs dry after) */
-static LONG64 g_sw_n, g_sw_tk, g_sw_lag[4];
 static void vk_sync_wait_(SyncJob *j) {
     uint64_t want = (uint64_t)(uintptr_t)j->o->s;
     if (!want || !V.alive) { j->result = 3; return; }       /* never fenced */
@@ -3119,9 +3075,7 @@ static void vk_sync_wait_(SyncJob *j) {
     for (int i = 0; i < NSLOT; i++) {
         Slot *s = &R.slot[i];
         if (!s->pending || s->serial != want) continue;
-        LONG64 t0 = tk();
         VkResult r = vkWaitForFences(V.device, 1, &s->fence, VK_TRUE, j->timeout);
-        g_sw_n++; g_sw_tk += tk() - t0; g_sw_lag[R.serial - want < 3 ? R.serial - want : 3]++;
         if (r == VK_SUCCESS) { if (s->serial > R.done) R.done = s->serial; j->result = 1; cb_poll(); } else j->result = r == VK_TIMEOUT ? 2 : 3;
         return;
     }
@@ -3875,11 +3829,6 @@ static void vkd_shutdown(void) {
     if (!R.ring) return;
     {   LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
         double k = 1000.0 / (double)fq.QuadPart;
-        printf("nvn_vk_syncwait: the game's fence waits that found the GPU busy: %lld, %.0f ms in all; submissions after the fence waited for: 0: %lld, 1: %lld, 2: %lld, 3 or more: %lld\n",
-               (long long)g_sw_n, (double)g_sw_tk * k, (long long)g_sw_lag[0], (long long)g_sw_lag[1], (long long)g_sw_lag[2], (long long)g_sw_lag[3]);
-        printf("nvn_vk_texbuf: CopyTextureToBuffer in command lists: %lld as GPU copies into a compute buffer, %lld read on the CPU (SMO_VK_ASYNC_TEXBUF=1: the first kind)\n", (long long)g_texbuf_async, (long long)g_texbuf_sync);
-        printf("nvn_vk_syncwait: the render thread's own waits: a command buffer slot still busy %lld times, %.0f ms; wait for everything %lld times, %.0f ms; compute copy-back syncs %lld, %.0f ms\n",
-               (long long)g_reuse_n, (double)g_reuse_tk * k, (long long)g_waitall_n, (double)g_waitall_tk * k, (long long)R.cb_waits, (double)R.cb_wait_ticks * k);
         printf("nvn_vk_fl: format lists %s: %lld render targets with one (%lld of them not mutable: no sRGB / UNORM twin), %lld views given the image's own format\n", fl_on() ? "on" : "off (SMO_VK_FORMAT_LIST=1 turns them on)", (long long)g_fl_images, (long long)g_fl_fixed, (long long)g_fl_refused);
         printf("nvn_vk_tex: textures made ahead of their first use: %lld (%.0f MB, %.0f ms in all, at most %.1f ms after one present); made or read at their use: %lld times, %.0f ms (of them in scene frames: %lld, %.0f ms)\n",
                (long long)g_ta_n, (double)g_ta_bytes / 1048576.0, (double)g_ta_tk * k, (double)g_ta_max_tk * k, (long long)g_late_n, (double)g_late_tk * k, (long long)g_late_scene_n, (double)g_late_scene_tk * k);
