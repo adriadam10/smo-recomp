@@ -302,7 +302,12 @@ static void audio_sink_out(const Sink *s, uint64_t mb, uint32_t ns) {
     if (ns != 240) { static int said; if (!said++) printf("smo_audio: the renderer does not run at 48 kHz (%u samples per 5 ms frame): its upsampler output is NOT IMPLEMENTED, no sound\n", ns); return; }
     /* the sample buffer is always filled ([sdk 0x18ad4c]: the translated upsampler buffer, or the caller's argument): at 48 kHz the sink reads the mix buffers */
     const int32_t *L = (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[0] * ns * 4), *R = (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[nin > 1] * ns * 4);
-    const int32_t *C = nin >= 6 ? (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[2] * ns * 4) : NULL;      /* 6 channels: FL FR FC LFE BL BR; FC and the backs folded in */
+    /* 6 channels: FL FR FC LFE BL BR, folded to stereo with the coefficients of the system's own 6 -> 2 downmix when the
+     * output is stereo and the game asks for no downmix of its own (SMO asks none: its centre channel carries sound):
+     * front 1.0, centre 0.596, LFE 0.354, back 0.707 ([doc] yuzu audio_core sink_stream.cpp; not checked on a console).
+     * The LFE used to be left out (SMO puts sound in it: peak 7,389 in a Cap Kingdom run) and the centre was at 0.707. */
+    const int32_t *C = nin >= 6 ? (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[2] * ns * 4) : NULL;
+    const int32_t *LFE = nin >= 6 ? (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[3] * ns * 4) : NULL;
     const int32_t *BL = nin >= 6 ? (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[4] * ns * 4) : NULL, *BR = nin >= 6 ? (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[5] * ns * 4) : NULL;
     float vol = g_dev_volume[0];
     for (uint32_t k = 0; k < nin; k++) {           /* the peak of each input channel: what the downmix (and the LFE it leaves out) carries */
@@ -311,7 +316,7 @@ static void audio_sink_out(const Sink *s, uint64_t mb, uint32_t ns) {
     }
     for (uint32_t i = 0; i < ns; i++) {
         float l = (float)L[i], r = (float)R[i];
-        if (C) { l += 0.707f * (float)C[i] + 0.707f * (float)BL[i]; r += 0.707f * (float)C[i] + 0.707f * (float)BR[i]; }
+        if (C) { float m = 0.596f * (float)C[i] + 0.354f * (float)LFE[i]; l += m + 0.707f * (float)BL[i]; r += m + 0.707f * (float)BR[i]; }
         l *= vol; r *= vol;
         int32_t li = (int32_t)(l < -32768.f ? -32768.f : l > 32767.f ? 32767.f : l), ri = (int32_t)(r < -32768.f ? -32768.f : r > 32767.f ? 32767.f : r);
         uint32_t a = (uint32_t)(li < 0 ? -li : li); if (a > g_sink_peak) g_sink_peak = a;
@@ -471,7 +476,7 @@ void smo_audio_report(FILE *out) {
     fprintf(out, "audio: device sink: %lld frames output, %lld blocks of 40 ms queued, %lld samples dropped (device behind), %lld underruns (device waited), peak level %u of 32767\n",
             (long long)g_sink_frames, (long long)g_sink_blocks, (long long)g_sink_dropped, (long long)g_sink_underruns, g_sink_peak);
     fprintf(out, "audio: device sink: first sound at sink frame %lld (%.2f s)\n", (long long)g_sink_first_sound, g_sink_first_sound * 0.005);
-    fprintf(out, "audio: device sink: %lld output samples clamped to 16 bits; input channel peaks %u %u %u %u %u %u (6 channels: FL FR FC LFE BL BR; the LFE is not mixed in)\n",
+    fprintf(out, "audio: device sink: %lld output samples clamped to 16 bits; input channel peaks %u %u %u %u %u %u (6 channels: FL FR FC LFE BL BR)\n",
             (long long)g_sink_clipped, g_in_peak[0], g_in_peak[1], g_in_peak[2], g_in_peak[3], g_in_peak[4], g_in_peak[5]);
 }
 
