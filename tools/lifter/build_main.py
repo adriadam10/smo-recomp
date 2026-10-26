@@ -30,6 +30,26 @@ RUNTIME = os.path.join(T.RUNTIME, 'core')        # runtime.h, neon.h, fpexact.h:
 CLANG = T.clang()
 OPT = os.environ.get('RECOMP_OPT', '-O1')
 EXTRA = ['-ffp-contract=off']
+
+
+def no_loop_load_elim():
+    """The clang flags that turn LoopLoadElimination off, as this clang spells them (none if it takes neither). On the
+    lifted code the pass changes nothing (all 219 objects byte-identical without it, clang 23 on Linux) but takes much of
+    the time of the files with the largest loops: guest registers live in memory (c->x[n]) and loops are gotos, so its
+    loop dependence analysis grows with the square of the accesses (c_0082.c: 164 -> 106 s, the same object)."""
+    import tempfile
+    src = os.path.join(tempfile.gettempdir(), 'smo_flag_probe.c')
+    with open(src, 'w') as f:
+        f.write('int f(int *p, int n) { int s = 0; for (int i = 0; i < n; i++) s += p[i]; return s; }\n')
+    for flags in (['-mllvm', '-opt-disable=loop-load-elim', '-mllvm', '-opt-bisect-verbose=false'],    # LLVM 20 and later
+                  ['-mllvm', '-enable-loop-load-elim=false']):                                         # older (clang 9)
+        r = subprocess.run([CLANG, '-c', '-O1', '-w'] + flags + [src, '-o', os.devnull], capture_output=True, text=True)
+        if r.returncode == 0 and not r.stderr.strip():
+            return flags
+    return []
+
+
+EXTRA += no_loop_load_elim()
 OPTNONE_LINES = int(os.environ.get('RECOMP_OPTNONE_LINES', '20000'))
 TIME_LIMIT = float(os.environ.get('RECOMP_TIME_LIMIT', '180'))
 BASE_FLAGS = ['-w', '-fno-strict-aliasing', '-I', RUNTIME, '-I', GEN]
