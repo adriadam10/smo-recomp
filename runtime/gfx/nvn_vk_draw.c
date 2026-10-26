@@ -1647,7 +1647,9 @@ static void cb_poll(void) {                        /* pending CBs whose submissi
     if (R.done < g_cb_serial) for (int i = 0; i < NSLOT; i++) if (R.slot[i].pending && vkGetFenceStatus(V.device, R.slot[i].fence) == VK_SUCCESS) slot_wait(&R.slot[i]);
     if (R.done >= g_cb_serial) cb_land(0);
 }
-static void cb_sync(void) {                        /* guest memory must hold what compute wrote, now */
+static struct { int line; LONG64 n, tk; } g_cbs_at[32];      /* nvn_vk_syncwait: the compute copy-back syncs that waited, by the source line that asked */
+static int g_cbs_n;
+static void cb_sync_at(int line) {                 /* guest memory must hold what compute wrote, now */
     int mid = g_cb_live != 0;
     if (!g_cb_live && !g_cb_pending) return;
     if (g_cb_live) { g_cb_serial = cmd_submit(NULL, NULL); R.cb_syncs++; }
@@ -1658,9 +1660,15 @@ static void cb_sync(void) {                        /* guest memory must hold wha
         if (R.done < g_cb_serial) R.done = g_cb_serial;
         QueryPerformanceCounter(&t1);
         R.cb_waits++; R.cb_wait_ticks += t1.QuadPart - t0.QuadPart;
+        {   int k = 0;
+            while (k < g_cbs_n && g_cbs_at[k].line != line) k++;
+            if (k == g_cbs_n && g_cbs_n < 32) g_cbs_at[g_cbs_n++].line = line;
+            if (k < 32) { g_cbs_at[k].n++; g_cbs_at[k].tk += t1.QuadPart - t0.QuadPart; }
+        }
     }
     cb_land(mid);
 }
+#define cb_sync() cb_sync_at(__LINE__)
 static void occ_pool(void) {
     if (g_occ_pool) return;
     if (!D.f12.hostQueryReset) nvn_vk_missing("occlusion counters on a GPU without hostQueryReset");
@@ -3872,6 +3880,9 @@ static void vkd_shutdown(void) {
         double k = 1000.0 / (double)fq.QuadPart;
         printf("nvn_vk_syncwait: the game's fence waits that found the GPU busy: %lld, %.0f ms in all; submissions after the fence waited for: 0: %lld, 1: %lld, 2: %lld, 3 or more: %lld\n",
                (long long)g_sw_n, (double)g_sw_tk * k, (long long)g_sw_lag[0], (long long)g_sw_lag[1], (long long)g_sw_lag[2], (long long)g_sw_lag[3]);
+        printf("nvn_vk_syncwait: compute copy-back syncs by the line of nvn_vk_draw.c that asked:");
+        for (int i = 0; i < g_cbs_n; i++) printf(" L%d %lld (%.0f ms)", g_cbs_at[i].line, (long long)g_cbs_at[i].n, (double)g_cbs_at[i].tk * k);
+        printf("\n");
         printf("nvn_vk_texbuf: CopyTextureToBuffer in command lists: %lld as GPU copies into a compute buffer, %lld read on the CPU (SMO_VK_ASYNC_TEXBUF=1: the first kind)\n", (long long)g_texbuf_async, (long long)g_texbuf_sync);
         printf("nvn_vk_syncwait: the render thread's own waits: a command buffer slot still busy %lld times, %.0f ms; wait for everything %lld times, %.0f ms; compute copy-back syncs %lld, %.0f ms\n",
                (long long)g_reuse_n, (double)g_reuse_tk * k, (long long)g_waitall_n, (double)g_waitall_tk * k, (long long)R.cb_waits, (double)R.cb_wait_ticks * k);
