@@ -337,7 +337,7 @@ static LONG64 g_ts_n;
 #define FRSTAT_N 40000
 static float g_fr_gpu[FRSTAT_N], g_fr_wall[FRSTAT_N];
 static uint8_t g_fr_play[FRSTAT_N];
-static uint16_t g_fr_vpw[FRSTAT_N], g_fr_vph[FRSTAT_N];      /* largest viewport drawn into a target 1280 or more wide: the game's dynamic resolution (SMO_FRAMECSV) */
+static uint16_t g_fr_vpw[FRSTAT_N], g_fr_vph[FRSTAT_N];      /* largest viewport drawn into a 16:9 target 1280 or more wide (a screen target, not a shadow map): the game's dynamic resolution (SMO_FRAMECSV) */
 static LONG64 g_cur_frame, g_play_frames, g_scene_frames, g_frames_counted;      /* frames: play frames, frames with compute dispatches, all ("nvn_vk_frames:") */
 void nvn_tl(int ev, int arg);                     /* nvn_gl.c: SMO_FRAMETL (13/14: a wait for the GPU begins / ends) */
 static void rep_land(void);
@@ -1529,7 +1529,7 @@ static void set_dynamic_state(void) {
     vp.x = x; vp.y = y + h; vp.width = w; vp.height = -h; vp.minDepth = R.drange[0]; vp.maxDepth = R.drange[1];      /* NVN upper-left origin: clip y = +1 is row y (design, section 3) */
     if (vp.minDepth < 0) vp.minDepth = 0; if (vp.maxDepth > 1) vp.maxDepth = 1;
     vkCmdSetViewport(R.cmd, 0, 1, &vp);
-    if (R.pass_w >= 1280 && g_cur_frame >= 0 && g_cur_frame < FRSTAT_N && R.have_viewport && R.viewport[2] * R.viewport[3] > (float)g_fr_vpw[g_cur_frame] * (float)g_fr_vph[g_cur_frame]) {
+    if (R.pass_w >= 1280 && abs(R.pass_w * 9 - R.pass_h * 16) <= 16 && g_cur_frame >= 0 && g_cur_frame < FRSTAT_N && R.have_viewport && R.viewport[2] * R.viewport[3] > (float)g_fr_vpw[g_cur_frame] * (float)g_fr_vph[g_cur_frame]) {
         g_fr_vpw[g_cur_frame] = (uint16_t)R.viewport[2]; g_fr_vph[g_cur_frame] = (uint16_t)R.viewport[3];
     }
     int sx = R.have_scissor ? R.scissor[0] : 0, sy = R.have_scissor ? R.scissor[1] : 0, sw = R.have_scissor ? R.scissor[2] : R.pass_w, sh = R.have_scissor ? R.scissor[3] : R.pass_h;
