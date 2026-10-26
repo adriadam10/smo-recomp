@@ -210,8 +210,10 @@ void main_stack_report(void) {
            lo.State == MEM_RESERVE ? "no access" : "ACCESSIBLE", hi.State == MEM_RESERVE ? "no access" : "ACCESSIBLE");
 }
 
+extern DWORD g_guest_main_tid;              /* os_threads.c: the thread nnMain runs on, named in reports */
 static DWORD WINAPI guest_main(LPVOID arg) {
     (void)arg;
+    g_guest_main_tid = GetCurrentThreadId();
     static Ctx c;
     /* the main thread's stack has the size the program's own meta data asks for (main.npdm, META header +0x1c:
      * 0x100000 for this game; read from the file next to the ELF), with no-access pages below and above it, so that an
