@@ -1710,7 +1710,8 @@ static void rep_calibrate(void) {                  /* GPU clock -> QueryPerforma
     g_cal_off_ns = host - (double)ts[0] * (double)V.props.limits.timestampPeriod;
     g_cal_at = now;
 }
-static uint64_t g_q_wait[512];                   /* a query read before the GPU wrote it: reset only once that submission has finished */
+static uint64_t g_q_wait[512];
+static LONG64 g_rep_lag_n; static double g_rep_lag_sum, g_rep_lag_min = 1e9, g_rep_lag_max = -1e9;      /* GPU report times against the clock when written (nvn_vk_syncwait:) */                   /* a query read before the GPU wrote it: reset only once that submission has finished */
 static uint64_t rep_time(int i) {                  /* the report's time: its query when the GPU has written it, else now */
     uint64_t t = 0;
     if (g_rep[i].q) {
@@ -1718,7 +1719,12 @@ static uint64_t rep_time(int i) {                  /* the report's time: its que
         if (vkGetQueryPoolResults(V.device, g_rep_pool, (uint32_t)i, 1, sizeof t, &t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
             vkResetQueryPool(V.device, g_rep_pool, (uint32_t)i, 1);
             rep_calibrate();
-            if (g_rep_gpu) return (uint64_t)(g_cal_off_ns + (double)t * (double)V.props.limits.timestampPeriod);
+            if (g_rep_gpu) {
+                uint64_t v = (uint64_t)(g_cal_off_ns + (double)t * (double)V.props.limits.timestampPeriod);
+                double lag = (double)((int64_t)(vk_now_ns() - v)) / 1e6;      /* how long before now the work ended: must be >= 0 */
+                g_rep_lag_n++; g_rep_lag_sum += lag; if (lag < g_rep_lag_min) g_rep_lag_min = lag; if (lag > g_rep_lag_max) g_rep_lag_max = lag;
+                return v;
+            }
         } else g_q_wait[i] = g_rep[i].serial;
     }
     return vk_now_ns();
@@ -4020,6 +4026,7 @@ static void vkd_shutdown(void) {
         printf("nvn_vk_syncwait: batches that kept the last batch's compute buffers bound instead of waiting (SMO_VK_CB_CARRY=1): %lld\n", (long long)g_cb_carried);
         printf("nvn_vk_syncwait: game fence waits answered with the previous wait's fence (SMO_VK_FENCE_LATE=1): %lld\n", (long long)g_late_n);
         printf("nvn_vk_ubo: uniform buffer bytes bound %lld of %lld (SMO_VK_UBO_TRIM=1 binds only what the stages read)\n", (long long)g_ubo_sent, (long long)g_ubo_full);
+        if (g_rep_lag_n) printf("nvn_vk_syncwait: report GPU times %lld, written this long after the work ended: mean %.2f ms, min %.2f, max %.2f (negative: the calibration is off)\n", (long long)g_rep_lag_n, g_rep_lag_sum / (double)g_rep_lag_n, g_rep_lag_min, g_rep_lag_max);
         printf("nvn_vk_syncwait: timestamp reports deferred to the end of their submission (SMO_VK_REPORT_DEFER=1): %lld\n", (long long)g_rep_deferred);
         printf("nvn_vk_syncwait: compute copy-back syncs by the line of nvn_vk_draw.c that asked:");
         for (int i = 0; i < g_cbs_n; i++) printf(" L%d %lld (%.0f ms)", g_cbs_at[i].line, (long long)g_cbs_at[i].n, (double)g_cbs_at[i].tk * k);
