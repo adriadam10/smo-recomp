@@ -3,6 +3,7 @@ name: ci
 # Checks that need no game dump. Linux: runtime/core and the rest of the runtime compiled with -Werror, and their
 # self-tests (Win32 shim, crash report, time zones, save journal, controllers on SDL3's virtual pads, sockets, core model,
 # virtual memory pools, vertex layout, FreeType glyphs). Python: every tool and script compiles.
+# Windows: tests/check_fast_paths.py with the runner's clang and tests/check_game_places.py (starts no game).
 on:
   push:
     branches: [main]
@@ -37,3 +38,17 @@ jobs:
           python-version: '3.13'
       - name: Every tool, script and test compiles
         run: python -m compileall -q tools scripts tests
+
+  windows:
+    runs-on: windows-latest
+    env:
+      LLVM_ROOT: C:\Program Files\LLVM
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: tests/check_fast_paths.py
+        run: python tests/check_fast_paths.py
+      - name: tests/check_game_places.py
+        run: python tests/check_game_places.py
