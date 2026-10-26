@@ -182,7 +182,8 @@ static SDL_AudioStream *g_stream;
 static int16_t g_wbuf[SINK_NBLK][SINK_BLOCK * 2];
 static int g_wcur, g_wfill, g_wopen = -1, g_wstarted;
 static LONG64 g_sink_frames, g_sink_blocks, g_sink_dropped, g_sink_underruns;
-static uint32_t g_sink_peak;
+static uint32_t g_sink_peak, g_in_peak[6];
+static LONG64 g_sink_clipped;                    /* output samples that went past 16 bits and were clamped (the downmix can add up past full scale) */
 static FILE *g_wav;                               /* SMO_AUDIO_WAV=<file>: what goes to the device, as a WAV file (header completed at exit) */
 static uint32_t g_wav_frames;
 uint32_t smo_audio_wav_frames(void) { return g_wav_frames; }      /* nvn_vk_draw.c: where in the WAV a saved frame falls */
@@ -303,12 +304,17 @@ static void audio_sink_out(const Sink *s, uint64_t mb, uint32_t ns) {
     const int32_t *C = nin >= 6 ? (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[2] * ns * 4) : NULL;      /* 6 channels: FL FR FC LFE BL BR; FC and the backs folded in */
     const int32_t *BL = nin >= 6 ? (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[4] * ns * 4) : NULL, *BR = nin >= 6 ? (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[5] * ns * 4) : NULL;
     float vol = g_dev_volume[0];
+    for (uint32_t k = 0; k < nin; k++) {           /* the peak of each input channel: what the downmix (and the LFE it leaves out) carries */
+        const int32_t *in = (const int32_t *)(uintptr_t)(mb + (uint64_t)s->index[k] * ns * 4);
+        for (uint32_t i = 0; i < ns; i++) { uint32_t a = (uint32_t)(in[i] < 0 ? -(int64_t)in[i] : in[i]); if (a > g_in_peak[k]) g_in_peak[k] = a; }
+    }
     for (uint32_t i = 0; i < ns; i++) {
         float l = (float)L[i], r = (float)R[i];
         if (C) { l += 0.707f * (float)C[i] + 0.707f * (float)BL[i]; r += 0.707f * (float)C[i] + 0.707f * (float)BR[i]; }
         l *= vol; r *= vol;
         int32_t li = (int32_t)(l < -32768.f ? -32768.f : l > 32767.f ? 32767.f : l), ri = (int32_t)(r < -32768.f ? -32768.f : r > 32767.f ? 32767.f : r);
         uint32_t a = (uint32_t)(li < 0 ? -li : li); if (a > g_sink_peak) g_sink_peak = a;
+        g_sink_clipped += (l < -32768.f || l > 32767.f) + (r < -32768.f || r > 32767.f);
         if (g_wfill == 0 && SINK_FULL()) { g_sink_dropped += ns - i; return; }    /* all 16 blocks still queued */
         g_wbuf[g_wcur][g_wfill * 2] = (int16_t)li; g_wbuf[g_wcur][g_wfill * 2 + 1] = (int16_t)ri;
         if (g_wav) { int16_t fr[2] = {(int16_t)li, (int16_t)ri}; fwrite(fr, 4, 1, g_wav); g_wav_frames++; }
@@ -462,6 +468,8 @@ void smo_audio_report(FILE *out) {
             g_nsys, (long long)g_frames, (long long)g_lists, (long long)g_commands_bytes);
     fprintf(out, "audio: device sink: %lld frames output, %lld blocks of 40 ms queued, %lld samples dropped (device behind), %lld underruns (device waited), peak level %u of 32767\n",
             (long long)g_sink_frames, (long long)g_sink_blocks, (long long)g_sink_dropped, (long long)g_sink_underruns, g_sink_peak);
+    fprintf(out, "audio: device sink: %lld output samples clamped to 16 bits; input channel peaks %u %u %u %u %u %u (6 channels: FL FR FC LFE BL BR; the LFE is not mixed in)\n",
+            (long long)g_sink_clipped, g_in_peak[0], g_in_peak[1], g_in_peak[2], g_in_peak[3], g_in_peak[4], g_in_peak[5]);
 }
 
 void register_smo_audio(void) {
