@@ -337,6 +337,7 @@ static LONG64 g_ts_n;
 #define FRSTAT_N 40000
 static float g_fr_gpu[FRSTAT_N], g_fr_wall[FRSTAT_N];
 static uint8_t g_fr_play[FRSTAT_N];
+static uint16_t g_fr_vpw[FRSTAT_N], g_fr_vph[FRSTAT_N];      /* largest viewport drawn into a target 1280 or more wide: the game's dynamic resolution (SMO_FRAMECSV) */
 static LONG64 g_cur_frame, g_play_frames, g_scene_frames, g_frames_counted;      /* frames: play frames, frames with compute dispatches, all ("nvn_vk_frames:") */
 void nvn_tl(int ev, int arg);                     /* nvn_gl.c: SMO_FRAMETL (13/14: a wait for the GPU begins / ends) */
 static void rep_land(void);
@@ -1528,6 +1529,9 @@ static void set_dynamic_state(void) {
     vp.x = x; vp.y = y + h; vp.width = w; vp.height = -h; vp.minDepth = R.drange[0]; vp.maxDepth = R.drange[1];      /* NVN upper-left origin: clip y = +1 is row y (design, section 3) */
     if (vp.minDepth < 0) vp.minDepth = 0; if (vp.maxDepth > 1) vp.maxDepth = 1;
     vkCmdSetViewport(R.cmd, 0, 1, &vp);
+    if (R.pass_w >= 1280 && g_cur_frame >= 0 && g_cur_frame < FRSTAT_N && R.have_viewport && R.viewport[2] * R.viewport[3] > (float)g_fr_vpw[g_cur_frame] * (float)g_fr_vph[g_cur_frame]) {
+        g_fr_vpw[g_cur_frame] = (uint16_t)R.viewport[2]; g_fr_vph[g_cur_frame] = (uint16_t)R.viewport[3];
+    }
     int sx = R.have_scissor ? R.scissor[0] : 0, sy = R.have_scissor ? R.scissor[1] : 0, sw = R.have_scissor ? R.scissor[2] : R.pass_w, sh = R.have_scissor ? R.scissor[3] : R.pass_h;
     if (R.pass_rs && R.have_scissor) rs_rect(&sx, &sy, &sw, &sh);
     if (sx < 0) { sw += sx; sx = 0; } if (sy < 0) { sh += sy; sy = 0; }
@@ -3955,6 +3959,19 @@ static void vkd_init(void) {
 static int frstat_cmp(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return x < y ? -1 : x > y; }
 /* play frames only (dispatches and more than 120 draws); the first 30 are left out (their buffers were recorded
  * while the stage was still being set up). GPU ms = sum of the spans of the frame's command buffers (SMO_VK_GPUTIME=1). */
+/* SMO_FRAMECSV=<file> (measurement): one line a frame: frame, play frame, ms between presents, GPU ms (SMO_VK_GPUTIME=1),
+ * largest viewport into a 1280+ wide target (the dynamic resolution). For benchmarks and A/B comparisons. */
+static void frstat_csv(void) {
+    const char *path = getenv("SMO_FRAMECSV");
+    if (!path || !*path) return;
+    FILE *f = fopen(path, "w");
+    if (!f) { printf("nvn_vk: SMO_FRAMECSV: cannot write %s\n", path); return; }
+    fprintf(f, "frame,play,wall_ms,gpu_ms,vp_w,vp_h\n");
+    for (long long i = 0; i < g_cur_frame && i < FRSTAT_N; i++)
+        fprintf(f, "%lld,%d,%.3f,%.3f,%u,%u\n", i, g_fr_play[i], (double)g_fr_wall[i], (double)g_fr_gpu[i], g_fr_vpw[i], g_fr_vph[i]);
+    fclose(f);
+    printf("nvn_vk: SMO_FRAMECSV: %lld frames written to %s\n", (long long)(g_cur_frame < FRSTAT_N ? g_cur_frame : FRSTAT_N), path);
+}
 static void frstat_report(void) {
     static float g[FRSTAT_N], w[FRSTAT_N];
     int n = 0, seen = 0, slow = 0;
@@ -3990,7 +4007,7 @@ static void vkd_shutdown(void) {
         printf("nvn_vk_tex: textures made ahead of their first use: %lld (%.0f MB, %.0f ms in all, at most %.1f ms after one present); made or read at their use: %lld times, %.0f ms (of them in scene frames: %lld, %.0f ms)\n",
                (long long)g_ta_n, (double)g_ta_bytes / 1048576.0, (double)g_ta_tk * k, (double)g_ta_max_tk * k, (long long)g_late_n, (double)g_late_tk * k, (long long)g_late_scene_n, (double)g_late_scene_tk * k);
     }
-    frstat_report();
+    frstat_report(); frstat_csv();
     if (RS_ON && rs_ui_native()) printf("nvn_vk_scale: SMO_VK_UI_NATIVE=1: the window's textures are kept at the game's size; passes with such a colour target and a SCALED depth target (drawn without depth): %lld\n", (long long)g_rs_mixed);
     if (RS_ON) printf("nvn_vk_scale: resolution scale %.3f: %lld images made scaled, %lld fragment stages translated in this run for it (%lld of them read the pixel position, %lld fetch texels by integer position), %lld uploads into and %lld read-backs from a scaled image, %lld copies / blits touching one\n",
                       (double)rs_scale(), (long long)g_rs_images, (long long)g_rs_stages, (long long)g_rs_fcs, (long long)g_rs_tf, (long long)g_rs_up, (long long)g_rs_down, (long long)g_rs_blits);
