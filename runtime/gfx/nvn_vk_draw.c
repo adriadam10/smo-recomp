@@ -1666,6 +1666,14 @@ static int rep_defer(uint64_t addr) {
     g_rep_deferred++;
     return 1;
 }
+static void rep_flush_to(uint64_t serial) {     /* a fence answered before its work ran (SMO_VK_FENCE_LATE): the game reads the reports recorded before it now, so they get the time now */
+    while (g_rep_n && g_rep[g_rep_head].serial <= serial) {
+        int i = g_rep_head;
+        uint64_t d[2] = {0, vk_now_ns()};
+        memcpy(P(g_rep[i].addr), d, 16); host_wrote(g_rep[i].addr, 16, GEN_REPORT);
+        g_rep_head = (g_rep_head + 1) % 512; g_rep_n--;
+    }
+}
 static void rep_land(void) {
     while (g_rep_n) {
         int i = g_rep_head;
@@ -3126,6 +3134,7 @@ static void vk_sync_wait_(SyncJob *j) {
             uint64_t prev = deferred;
             deferred = want;
             if (prev && late == 2 && g_cb_pending) prev = 0;      /* experiment: compute results of the frame must be in guest memory, so wait as before */
+            if (prev && late == 3) rep_flush_to(want);      /* experiment: the reports of the frame answered late get the time now */
             if (prev) { g_late_n++; want = prev; if (want <= R.done) { j->result = 1; cb_poll(); rep_land(); return; } }
         }
     }
