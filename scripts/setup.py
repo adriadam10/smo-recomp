@@ -20,6 +20,7 @@ by git). Steps run in this order and are resumable: a step whose output exists i
     tables     generated headers and tables                                     (tools/lifter/gen_tables.py, gen_sdktest.py)
     sdk        the system-library functions that are lifted too                                 (tools/lifter/sdklift.py)
     link       host runtime + game library -> build/bin/smo_native.exe                          (tools/lifter/build_exe.py)
+    shaders    every shader stage of the game to SPIR-V, into the renderer's cache                (tools/lifter/precompile_shaders.py)
     check      differential test against Unicorn and link check (only with --only check or --check; minutes)
 
 Other commands:  --status (what is done)   --steps (list)   --only <step>
@@ -64,6 +65,13 @@ def check_deps(a):
         clang = shutil.which(T.clang()) or ''
         tools = (('Apple clang (xcode-select --install)', clang), ('Vulkan SDK (~/VulkanSDK or VULKAN_SDK)', vkh),
                  ('SDL3 (brew install sdl3, or SDL3_ROOT)', os.path.join(T.sdl3()[0], 'SDL3', 'SDL.h')))
+    elif T.LINUX:                                     # docs/linux-port.md: the distribution's packages
+        import shutil
+        clang = shutil.which(T.clang()) or ''
+        tools = (('clang and lld (clang, lld)', clang), ('lld', shutil.which('ld.lld') or ''), ('Vulkan headers (vulkan-headers)', vkh),
+                 ('SDL3 (sdl3)', os.path.join(T.sdl3()[0], 'SDL3', 'SDL.h')), ('shaderc (shaderc)', '/usr/include/shaderc/shaderc.h'),
+                 ('FreeType (freetype2)', '/usr/include/freetype2/ft2build.h'), ('FFmpeg (ffmpeg)', '/usr/include/libavformat/avformat.h'),
+                 ('OpenSSL (openssl)', '/usr/include/openssl/md5.h'))
     else:
         clang = T.clang()
         sdl = os.environ.get('SDL3_ROOT') or next(iter(sorted(glob.glob(os.path.join(REPO, 'deps', 'SDL3-*')))), '')
@@ -102,6 +110,7 @@ STEPS = [
     ('sdk', 'gen/sdklift_gen.c', lambda: exists('gen', 'sdklift_report.txt'),
      lambda a: [[PY, tool('lifter', 'sdklift.py'), 'gen']]),
     ('link', 'bin/' + T.EXE, None, lambda a: [[PY, tool('lifter', 'build_exe.py')]]),
+    ('shaders', 'cache/vk/spv', None, lambda a: [[PY, tool('lifter', 'precompile_shaders.py')]]),
     ('check', 'difftest + linkcheck', None,
      lambda a: [[PY, tool('lifter', 'difftest.py'), 'all'], [PY, tool('lifter', 'linkcheck.py')]]),
 ]
