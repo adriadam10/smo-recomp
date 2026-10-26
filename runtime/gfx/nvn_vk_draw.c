@@ -3805,6 +3805,7 @@ swap: ;
             LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
             if (!t_first) t_first = t_now;
             if (!play && R.frame_draws <= 60 && frame > 600) { if (!t_load) t_load = t_now; } else if (!play && R.frame_draws > 60) t_load = 0;      /* t_load: the start of the run of loading-screen frames before the first play frame */
+            if (play && !said) { void display_play_reached(void); display_play_reached(); }
             if (play && !said) { said = 1; printf("nvn_vk: first play frame is frame %lld, %.1f s after the first present; the loading screen before it lasted %.1f s\n", (long long)frame, (double)(t_now - t_first) / (double)fq.QuadPart, t_load ? (double)(t_now - t_load) / (double)fq.QuadPart : 0.0); }
         }
         if (frame >= 0 && frame < FRSTAT_N) {
