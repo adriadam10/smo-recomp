@@ -307,8 +307,10 @@ static void occ_end(void) { if (g_occ_open) { vkCmdEndQuery(R.cmd, g_occ_pool, (
  * frame's passes are split by this file rather than by the game's own target changes */
 static struct { int line; long long n; } g_pe[16]; static int g_pe_n;
 static long long g_retarget_same;             /* target sets equal to the current targets: the pass went on */
+static void pass_vp_note(void);
 static void pass_end_r(int line) {
     if (!R.in_pass) return;
+    pass_vp_note();
     occ_end(); vkCmdEndRendering(R.cmd); R.in_pass = 0; pass_shot();
     int i; for (i = 0; i < g_pe_n && g_pe[i].line != line; i++) {}
     if (i == g_pe_n && g_pe_n < 16) { g_pe[g_pe_n].line = line; g_pe[g_pe_n++].n = 0; }
@@ -337,8 +339,16 @@ static LONG64 g_ts_n;
 #define FRSTAT_N 40000
 static float g_fr_gpu[FRSTAT_N], g_fr_wall[FRSTAT_N];
 static uint8_t g_fr_play[FRSTAT_N];
-static uint16_t g_fr_vpw[FRSTAT_N], g_fr_vph[FRSTAT_N];      /* largest viewport drawn into a 16:9 target 1280 or more wide (a screen target, not a shadow map): the game's dynamic resolution (SMO_FRAMECSV) */
+static uint16_t g_fr_vpw[FRSTAT_N], g_fr_vph[FRSTAT_N];      /* SMO_FRAMECSV: the viewport of the frame's main 3D pass (the pass with a depth target and the most draws): the game's dynamic resolution */
+static uint32_t g_fr_vpdraws[FRSTAT_N];
+static uint16_t g_pass_vpw, g_pass_vph; static LONG64 g_pass_draws0; static int g_pass_depth;      /* the pass being recorded: its largest viewport, draws so far at its start, depth target */
 static LONG64 g_cur_frame, g_play_frames, g_scene_frames, g_frames_counted;      /* frames: play frames, frames with compute dispatches, all ("nvn_vk_frames:") */
+static void pass_vp_note(void) {                   /* at a pass's end: the frame's main 3D pass so far (a depth target, the most draws) */
+    LONG64 nd = R.frame_draws - g_pass_draws0;
+    if (!g_pass_depth || g_cur_frame < 0 || g_cur_frame >= FRSTAT_N || nd <= (LONG64)g_fr_vpdraws[g_cur_frame]) return;
+    g_fr_vpdraws[g_cur_frame] = (uint32_t)nd;
+    g_fr_vpw[g_cur_frame] = g_pass_vpw ? g_pass_vpw : (uint16_t)R.pass_w; g_fr_vph[g_cur_frame] = g_pass_vph ? g_pass_vph : (uint16_t)R.pass_h;
+}
 void nvn_tl(int ev, int arg);                     /* nvn_gl.c: SMO_FRAMETL (13/14: a wait for the GPU begins / ends) */
 static void rep_land(void);
 static LONG64 g_reuse_n, g_reuse_tk, g_waitall_n, g_waitall_tk;      /* nvn_vk_syncwait: the render thread's own waits by cause */
@@ -1392,6 +1402,7 @@ static int pass_begin(void) {
     vkCmdBeginRendering(R.cmd, &ri);
     g_fr_passes++;
     R.in_pass = 1; R.pass_w = w; R.pass_h = h;
+    g_pass_vpw = g_pass_vph = 0; g_pass_draws0 = R.frame_draws; g_pass_depth = R.depth.tex != NULL;
     return 1;
 }
 
@@ -1529,9 +1540,7 @@ static void set_dynamic_state(void) {
     vp.x = x; vp.y = y + h; vp.width = w; vp.height = -h; vp.minDepth = R.drange[0]; vp.maxDepth = R.drange[1];      /* NVN upper-left origin: clip y = +1 is row y (design, section 3) */
     if (vp.minDepth < 0) vp.minDepth = 0; if (vp.maxDepth > 1) vp.maxDepth = 1;
     vkCmdSetViewport(R.cmd, 0, 1, &vp);
-    if (R.pass_w >= 1280 && abs(R.pass_w * 9 - R.pass_h * 16) <= 16 && g_cur_frame >= 0 && g_cur_frame < FRSTAT_N && R.have_viewport && R.viewport[2] * R.viewport[3] > (float)g_fr_vpw[g_cur_frame] * (float)g_fr_vph[g_cur_frame]) {
-        g_fr_vpw[g_cur_frame] = (uint16_t)R.viewport[2]; g_fr_vph[g_cur_frame] = (uint16_t)R.viewport[3];
-    }
+    if (R.have_viewport && R.viewport[2] * R.viewport[3] > (float)g_pass_vpw * (float)g_pass_vph) { g_pass_vpw = (uint16_t)R.viewport[2]; g_pass_vph = (uint16_t)R.viewport[3]; }
     int sx = R.have_scissor ? R.scissor[0] : 0, sy = R.have_scissor ? R.scissor[1] : 0, sw = R.have_scissor ? R.scissor[2] : R.pass_w, sh = R.have_scissor ? R.scissor[3] : R.pass_h;
     if (R.pass_rs && R.have_scissor) rs_rect(&sx, &sy, &sw, &sh);
     if (sx < 0) { sw += sx; sx = 0; } if (sy < 0) { sh += sy; sy = 0; }
