@@ -1733,13 +1733,16 @@ static int g_rep_head, g_rep_n;
 static LONG64 g_rep_deferred;
 static int rep_mode(void) { static int m = -1; if (m < 0) m = getenv("SMO_VK_REPORT_DEFER") ? atoi(getenv("SMO_VK_REPORT_DEFER")) : 1; return m; }      /* 0 old way, 1 deferred, 2 (experiment) written at once without a wait */
 static int rep_defer_on(void) { return rep_mode() == 1; }
-static int rep_defer(uint64_t addr) {
-    if (!rep_defer_on() || g_rep_n == 512) return 0;
+/* top: a TIMESTAMP_TOP report (counter type 16), deferred only with GPU times: the game measures its GPU time from a
+ * type 16 report to a type 0 one, so both must come from the GPU's clock (a CPU time for the start counted the queue
+ * before the GPU too, and the game lowered its resolution to 800x450). */
+static int rep_defer(uint64_t addr, int top) {
+    if (!rep_defer_on() || g_rep_n == 512 || (top && !rep_gpu_on())) return 0;
     int i = (g_rep_head + g_rep_n++) % 512;
     g_rep[i].addr = addr; g_rep[i].serial = R.serial + 1;          /* the submission the commands recorded now go into */
-    g_rep[i].need_cb = g_cb_live || g_cb_pending; g_rep[i].epoch = g_cb_epoch; g_rep[i].q = 0;
+    g_rep[i].need_cb = !top && (g_cb_live || g_cb_pending); g_rep[i].epoch = g_cb_epoch; g_rep[i].q = 0;
     if (g_q_wait[i] && R.done >= g_q_wait[i]) { vkResetQueryPool(V.device, g_rep_pool, (uint32_t)i, 1); g_q_wait[i] = 0; }
-    if (rep_gpu_on() && !g_q_wait[i]) { cmd_begin(); vkCmdWriteTimestamp(R.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_rep_pool, (uint32_t)i); g_rep[i].q = 1; }
+    if (rep_gpu_on() && !g_q_wait[i]) { cmd_begin(); vkCmdWriteTimestamp(R.cmd, top ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_rep_pool, (uint32_t)i); g_rep[i].q = 1; }
     g_rep_deferred++;
     return 1;
 }
@@ -3006,7 +3009,7 @@ static void exec(const Cmd *m, int depth) {
             break;
         }
         if (a[0] != 0 && a[0] != 16) { static char msg[80]; snprintf(msg, sizeof msg, "nvnCommandBufferReportCounter of counter type %u (a GPU query)", (unsigned)a[0]); nvn_vk_missing(msg); break; }
-        if (a[1] && a[0] == 0 && rep_defer(a[1])) break;
+        if (a[1] && (a[0] == 0 || a[0] == 16) && rep_defer(a[1], a[0] == 16)) break;
         if (a[1] && a[0] == 0 && rep_mode() == 2) { uint64_t d[2] = {0, vk_now_ns()}; memcpy(P(a[1]), d, 16); host_wrote(a[1], 16, GEN_REPORT); break; }      /* experiment: no wait at all */
         if (a[1]) { if (a[0] == 0) cb_sync(); uint64_t d[2] = {0, vk_now_ns()}; memcpy(P(a[1]), d, 16); host_wrote(a[1], 16, GEN_REPORT); }
         break;
