@@ -1654,7 +1654,7 @@ static void cb_land(int midbatch) {                /* the GPU has finished every
  * due (vk_sync_wait_). Reports land in the order they were recorded; with the queue full, the old way. */
 static struct { uint64_t addr, serial; uint32_t epoch; int need_cb; } g_rep[512];
 static int g_rep_head, g_rep_n;
-static int rep_defer_on(void) { static int on = -1; if (on < 0) on = !getenv("SMO_VK_REPORT_DEFER") || atoi(getenv("SMO_VK_REPORT_DEFER")); return on; }
+static int rep_defer_on(void) { static int on = -1; if (on < 0) on = getenv("SMO_VK_REPORT_DEFER") && atoi(getenv("SMO_VK_REPORT_DEFER")); return on; }
 static int rep_defer(uint64_t addr) {
     if (!rep_defer_on() || g_rep_n == 512) return 0;
     int i = (g_rep_head + g_rep_n++) % 512;
