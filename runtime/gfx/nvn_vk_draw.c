@@ -3106,12 +3106,26 @@ static void vk_finish(void *arg) { (void)arg; if (V.alive) { cmd_wait_all(); if 
 static void vk_fence(void *arg) { SyncJob *j = arg; if (j->o->dead || !V.alive) return; j->o->s = (void *)(uintptr_t)(cmd_submit(NULL, NULL) + 1); }
 /* the game's own waits on its fences (nvnSyncWait) that found the GPU still busy: how long they waited, and how far the
  * fence was behind the newest submission (0: the game waits for everything it has submitted, so the GPU runs dry after) */
-static LONG64 g_sw_n, g_sw_tk, g_sw_lag[4];
+static LONG64 g_sw_n, g_sw_tk, g_sw_lag[4], g_late_n;
 static void vk_sync_wait_(SyncJob *j) {
     uint64_t want = (uint64_t)(uintptr_t)j->o->s;
     if (!want || !V.alive) { j->result = 3; return; }       /* never fenced */
     want--;
     if (want <= R.done) { j->result = 0; return; }
+    {   /* SMO_VK_FENCE_LATE=1 (experiment): the game waits for the fence of the frame it has just submitted, so its CPU and
+         * the GPU ran in series. Instead, wait for the fence deferred by the previous wait and defer this one: the GPU
+         * keeps at most two frames of work, the game's next frame overlaps the GPU's (LAS Recomp's overlap, 13398126d6).
+         * What the game reads after the fence that the GPU makes (compute results, reports, occlusion counts) is then
+         * one wait late: measured with tests/run_cap_kingdom.py. */
+        static int late = -1;
+        static uint64_t deferred;
+        if (late < 0) late = getenv("SMO_VK_FENCE_LATE") && atoi(getenv("SMO_VK_FENCE_LATE"));
+        if (late && j->timeout && want > deferred) {
+            uint64_t prev = deferred;
+            deferred = want;
+            if (prev) { g_late_n++; want = prev; if (want <= R.done) { j->result = 1; cb_poll(); rep_land(); return; } }
+        }
+    }
     for (int i = 0; i < NSLOT; i++) {
         Slot *s = &R.slot[i];
         if (!s->pending || s->serial != want) continue;
@@ -3873,6 +3887,7 @@ static void vkd_shutdown(void) {
         double k = 1000.0 / (double)fq.QuadPart;
         printf("nvn_vk_syncwait: the game's fence waits that found the GPU busy: %lld, %.0f ms in all; submissions after the fence waited for: 0: %lld, 1: %lld, 2: %lld, 3 or more: %lld\n",
                (long long)g_sw_n, (double)g_sw_tk * k, (long long)g_sw_lag[0], (long long)g_sw_lag[1], (long long)g_sw_lag[2], (long long)g_sw_lag[3]);
+        printf("nvn_vk_syncwait: game fence waits answered with the previous wait's fence (SMO_VK_FENCE_LATE=1): %lld\n", (long long)g_late_n);
         printf("nvn_vk_syncwait: timestamp reports deferred to the end of their submission (SMO_VK_REPORT_DEFER=1): %lld\n", (long long)g_rep_deferred);
         printf("nvn_vk_syncwait: compute copy-back syncs by the line of nvn_vk_draw.c that asked:");
         for (int i = 0; i < g_cbs_n; i++) printf(" L%d %lld (%.0f ms)", g_cbs_at[i].line, (long long)g_cbs_at[i].n, (double)g_cbs_at[i].tk * k);
