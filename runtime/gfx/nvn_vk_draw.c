@@ -555,8 +555,32 @@ struct VTex {
     int w, h, d, levels, layers, samples, expand, decode, is3d, feedback, bpb, bw, bh;
     int rs; float sx, sy;                          /* rs = 1 when the image is smaller than the game's texture (w, h are the image's; sx, sy = image / game) */
     int storage;                                   /* made with VK_IMAGE_USAGE_STORAGE_BIT (NVN_TEXTURE_FLAGS_IMAGE): it can be bound as an image */
+    int nvf; VkFormat vf[2];                       /* format list (vt_format_list): the only formats its views may have; 0: any */
     VView *views; VTex *next, *prev;
 };
+/* ---- format lists on render targets. A colour image is made MUTABLE_FORMAT so views of other formats work (NVN texture
+ * views). Mesa's AMD driver keeps DCC (colour compression) before RDNA3 only when the image lists its view formats
+ * (radv_are_formats_dcc_compatible): without a list every render target is uncompressed and every clear writes the whole
+ * image. So a target lists its own format and its sRGB / UNORM twin (none: not mutable at all), as LAS Recomp 03ee802f
+ * and Savage Wind #154; a view of any other format gets the image's own (logged). Not on storage images, which are bound
+ * through views of other formats. On by default on integrated GPUs; SMO_VK_FORMAT_LIST=0 / 1 turns it off / on. */
+static LONG64 g_fl_images, g_fl_fixed, g_fl_refused;
+static int fl_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SMO_VK_FORMAT_LIST"); on = e ? atoi(e) != 0 : V.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU; }
+    return on;
+}
+static VkFormat srgb_twin(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_SRGB;
+    case VK_FORMAT_R8G8B8A8_SRGB: return VK_FORMAT_R8G8B8A8_UNORM;
+    case VK_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_SRGB;
+    case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_B8G8R8A8_UNORM;
+    case VK_FORMAT_A8B8G8R8_UNORM_PACK32: return VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+    case VK_FORMAT_A8B8G8R8_SRGB_PACK32: return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+    default: return VK_FORMAT_UNDEFINED;
+    }
+}
 /* ---- internal resolution scale (graphics.ini resolution_scale; SMO_VK_SCALE wins).
  * A texture of the screen class (2D, one layer, attachable, the game's size about 16:9: rs_screen_class) gets an image
  * of round(size * scale); everything the game says in ITS pixels about such an image is converted where it is used:
@@ -605,13 +629,31 @@ static VkFlags layout_access(VkImageLayout l) {
     default: return 0;
     }
 }
+/* The stages that use an image in a layout: a layout change waits only for those before it and holds only those after
+ * it. With ALL_COMMANDS on both sides every change waited for the whole GPU to drain (on AMD a full partial flush of
+ * every shader kind). GENERAL (feedback passes, storage images, macOS) keeps ALL_COMMANDS: anything may use it.
+ * SMO_VK_FULL_STAGES=1: ALL_COMMANDS everywhere, as before (A/B). */
+static int full_stage_barriers(void) { static int on = -1; if (on < 0) on = getenv("SMO_VK_FULL_STAGES") && atoi(getenv("SMO_VK_FULL_STAGES")); return on; }
+static VkFlags layout_stage(VkImageLayout l, int src) {
+    switch (l) {
+    case VK_IMAGE_LAYOUT_UNDEFINED: return src ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: return VK_PIPELINE_STAGE_TRANSFER_BIT;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        return VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+               (D.f2.features.geometryShader ? VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT : 0);      /* valid only with the feature on */
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: return VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    default: return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    }
+}
 static void image_barrier(VkImage img, VkFlags aspect, VkImageLayout from, VkImageLayout to) {
     VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     DBG_ASSERT(!R.in_pass, "debug: an image layout change inside a render pass");
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.image = img;
     b.subresourceRange.aspectMask = aspect; b.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS; b.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
     b.srcAccessMask = layout_access(from); b.dstAccessMask = layout_access(to); b.oldLayout = from; b.newLayout = to;
-    vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    if (full_stage_barriers()) { vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b); return; }
+    vkCmdPipelineBarrier(R.cmd, layout_stage(from, 1), layout_stage(to, 0), 0, 0, NULL, 0, NULL, 1, &b);
 }
 static int general_layouts(void) {               /* every image stays in VK_IMAGE_LAYOUT_GENERAL after its first use. Metal has no layouts, so on
                                                   * Vulkan-over-Metal a transition only costs the pass it ends (13 of 102 a frame; measured: 102 -> 89
@@ -1015,6 +1057,14 @@ static VTex *vt_get2(Tex *t, int sync) {
             ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT; vt->storage = 1; g_storage_tex++;
             if (!fmt_supported(vt->fmt, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) ci.flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;      /* bound through a view of another format (sRGB, r32ui on r32f) */
         }
+        VkImageFormatListCreateInfo fl = {VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+        if (can_color && !vt->storage && fl_on()) {
+            vt->vf[0] = vt->fmt; vt->vf[1] = srgb_twin(vt->fmt);
+            vt->nvf = vt->vf[1] != VK_FORMAT_UNDEFINED ? 2 : 1;
+            if (vt->nvf == 1) { ci.flags &= ~(VkFlags)VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; g_fl_fixed++; }
+            else { fl.viewFormatCount = 2; fl.pViewFormats = vt->vf; ci.pNext = &fl; }
+            g_fl_images++;
+        }
         if (ci.imageType == VK_IMAGE_TYPE_2D && vt->w == vt->h && vt->layers >= 6 && vt->samples == 1) ci.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
         if (vt->is3d && (ci.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))) ci.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;      /* its slices can be render targets */
         ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1152,6 +1202,10 @@ static VkImageView vt_view(VTex *vt, const EView *e, int dim, int attach) {
     n->e = *e; n->vtype = dim; n->attach = attach;
     ci.image = vt->img; ci.format = vt->fmt;
     if (e->format != vt->t->b.format && vt->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !vt->decode && !vt->expand) { VkFormat f = tex_vkfmt(e->format, &ex, &dec); if (f && !ex && !dec && fmt_aspect(f) == VK_IMAGE_ASPECT_COLOR_BIT) ci.format = f; }
+    if (vt->nvf && ci.format != vt->vf[0] && (vt->nvf < 2 || ci.format != vt->vf[1])) {      /* not in the image's format list */
+        if (g_fl_refused++ < 10) printf("nvn_vk_fl: frame %lld: a view of format %d of a render target of format %d (not in its list): its own format instead\n", (long long)g_cur_frame, (int)ci.format, (int)vt->fmt);
+        ci.format = vt->fmt;
+    }
     if (attach) {
         ci.viewType = VK_IMAGE_VIEW_TYPE_2D; ci.subresourceRange.aspectMask = vt->aspect;
         ci.subresourceRange.baseMipLevel = (uint32_t)e->lvl0; ci.subresourceRange.levelCount = 1; ci.subresourceRange.baseArrayLayer = (uint32_t)e->lay0; ci.subresourceRange.layerCount = 1;
@@ -3754,6 +3808,7 @@ static void vkd_shutdown(void) {
     if (!R.ring) return;
     {   LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
         double k = 1000.0 / (double)fq.QuadPart;
+        printf("nvn_vk_fl: format lists %s: %lld render targets with one (%lld of them not mutable: no sRGB / UNORM twin), %lld views given the image's own format\n", fl_on() ? "on" : "off (SMO_VK_FORMAT_LIST=1 turns them on)", (long long)g_fl_images, (long long)g_fl_fixed, (long long)g_fl_refused);
         printf("nvn_vk_tex: textures made ahead of their first use: %lld (%.0f MB, %.0f ms in all, at most %.1f ms after one present); made or read at their use: %lld times, %.0f ms (of them in scene frames: %lld, %.0f ms)\n",
                (long long)g_ta_n, (double)g_ta_bytes / 1048576.0, (double)g_ta_tk * k, (double)g_ta_max_tk * k, (long long)g_late_n, (double)g_late_tk * k, (long long)g_late_scene_n, (double)g_late_scene_tk * k);
     }
