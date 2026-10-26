@@ -1656,7 +1656,8 @@ static void cb_land(int midbatch) {                /* the GPU has finished every
 static struct { uint64_t addr, serial; uint32_t epoch; int need_cb; } g_rep[512];
 static int g_rep_head, g_rep_n;
 static LONG64 g_rep_deferred;
-static int rep_defer_on(void) { static int on = -1; if (on < 0) on = !getenv("SMO_VK_REPORT_DEFER") || atoi(getenv("SMO_VK_REPORT_DEFER")); return on; }
+static int rep_mode(void) { static int m = -1; if (m < 0) m = getenv("SMO_VK_REPORT_DEFER") ? atoi(getenv("SMO_VK_REPORT_DEFER")) : 1; return m; }      /* 0 old way, 1 deferred, 2 (experiment) written at once without a wait */
+static int rep_defer_on(void) { return rep_mode() == 1; }
 static int rep_defer(uint64_t addr) {
     if (!rep_defer_on() || g_rep_n == 512) return 0;
     int i = (g_rep_head + g_rep_n++) % 512;
@@ -2890,6 +2891,7 @@ static void exec(const Cmd *m, int depth) {
         }
         if (a[0] != 0 && a[0] != 16) { static char msg[80]; snprintf(msg, sizeof msg, "nvnCommandBufferReportCounter of counter type %u (a GPU query)", (unsigned)a[0]); nvn_vk_missing(msg); break; }
         if (a[1] && a[0] == 0 && rep_defer(a[1])) break;
+        if (a[1] && a[0] == 0 && rep_mode() == 2) { uint64_t d[2] = {0, vk_now_ns()}; memcpy(P(a[1]), d, 16); host_wrote(a[1], 16, GEN_REPORT); break; }      /* experiment: no wait at all */
         if (a[1]) { if (a[0] == 0) cb_sync(); uint64_t d[2] = {0, vk_now_ns()}; memcpy(P(a[1]), d, 16); host_wrote(a[1], 16, GEN_REPORT); }
         break;
     case OP_CONSRASTER: if (a[0] & 1) nvn_vk_missing("conservative rasterisation (nvnCommandBufferSetConservativeRasterEnable)"); break;
@@ -3119,10 +3121,11 @@ static void vk_sync_wait_(SyncJob *j) {
          * one wait late: measured with tests/run_cap_kingdom.py. */
         static int late = -1;
         static uint64_t deferred;
-        if (late < 0) late = getenv("SMO_VK_FENCE_LATE") && atoi(getenv("SMO_VK_FENCE_LATE"));
+        if (late < 0) late = getenv("SMO_VK_FENCE_LATE") ? atoi(getenv("SMO_VK_FENCE_LATE")) : 0;
         if (late && j->timeout && want > deferred) {
             uint64_t prev = deferred;
             deferred = want;
+            if (prev && late == 2 && g_cb_pending) prev = 0;      /* experiment: compute results of the frame must be in guest memory, so wait as before */
             if (prev) { g_late_n++; want = prev; if (want <= R.done) { j->result = 1; cb_poll(); rep_land(); return; } }
         }
     }
