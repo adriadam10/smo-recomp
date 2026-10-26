@@ -78,6 +78,7 @@ typedef struct {
     char why[200];                   /* failure reason */
     char op[40];                     /* failure: name of the instruction (or feature) that could not be translated */
     uint32_t cbufs;                  /* constant buffers referenced */
+    uint32_t cb_words[18], cb_dyn;   /* per constant buffer: 1 + highest word read at a constant index; bit n: read at a run-time index (no limit) */
     uint32_t in_attr, out_attr;      /* generic attributes read / written */
     uint32_t tex_units;              /* texture units referenced (bound handles) */
     uint32_t ssbos, ssbo_written;    /* game storage buffers referenced (LDG / STG) and whether the shader writes them */

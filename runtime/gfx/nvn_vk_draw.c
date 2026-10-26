@@ -2028,6 +2028,18 @@ static CB *cb_new(uint64_t addr, uint64_t size) {
     return c;
 }
 typedef struct { uint64_t off, size; int zero; VkBuffer buf; } BufRef;
+/* SMO_VK_UBO_TRIM=1 (experiment): a uniform buffer is copied and bound only as far as the stage reads it at constant
+ * indices (mx_translate's cb_words), not whole (the game binds 4-64 KB blocks; Metro streamed 21.8 MB a frame). A buffer
+ * the stage also reads at a run-time index (LDC, compute's global-memory reads, bindless handles) stays whole. */
+static LONG64 g_ubo_full, g_ubo_sent;
+static uint64_t ubo_size(const VStage *v, unsigned n, uint64_t size) {
+    static int on = -1;
+    if (on < 0) on = getenv("SMO_VK_UBO_TRIM") && atoi(getenv("SMO_VK_UBO_TRIM"));
+    uint64_t want = size;
+    if (on && !(v->cb_dyn >> n & 1) && v->cb_words[n]) { uint64_t need = ((uint64_t)v->cb_words[n] * 4 + 15) & ~(uint64_t)15; if (need < size) want = need; }
+    g_ubo_full += (LONG64)size; g_ubo_sent += (LONG64)want;
+    return want;
+}
 /* Where a command reads the guest range from: a CB of this batch that contains it, else the stream ring. align: the offset
  * alignment the use needs (storage descriptors), 1 = none. Returns 1 when a CB is bound. */
 static int buf_ref(uint64_t addr, uint64_t size, uint64_t align, BufRef *b) {
@@ -2190,7 +2202,7 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
             b->zero = 0; b->buf = R.ring;
             if (n == 2) { b->off = c2_ring(5); b->size = sizeof R.c2[5]; }
             else if (n == 1 && st->ctl[3] && st->ctl[4]) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)(st->code + st->ctl[4]), b->size); }
-            else if (n >= 3 && R.ubo[5][n - 3].addr && R.ubo[5][n - 3].size) buf_ref(R.ubo[5][n - 3].addr, R.ubo[5][n - 3].size, al, b);
+            else if (n >= 3 && R.ubo[5][n - 3].addr && R.ubo[5][n - 3].size) buf_ref(R.ubo[5][n - 3].addr, ubo_size(v, n, R.ubo[5][n - 3].size), al, b);
             else b->zero = 1;                      /* c0 outside the storage descriptors, or nothing bound: zeros (OpenGL: nothing bound) */
         }
         for (unsigned k = 0; k < 16; k++) {
@@ -2336,7 +2348,7 @@ static int draw_prepare(unsigned prim) {
             if (n == 0) { b->off = c0_ring(); b->size = 0x614; }
             else if (n == 2) { b->off = c2_ring(s); b->size = sizeof R.c2[s]; }
             else if (n == 1 && st->ctl[3] && st->ctl[4]) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)(st->code - 0x30 + st->ctl[4]), b->size); }
-            else if (n >= 3 && R.ubo[s][n - 3].addr && R.ubo[s][n - 3].size) buf_ref(R.ubo[s][n - 3].addr, R.ubo[s][n - 3].size, sal, b);
+            else if (n >= 3 && R.ubo[s][n - 3].addr && R.ubo[s][n - 3].size) buf_ref(R.ubo[s][n - 3].addr, ubo_size(v, n, R.ubo[s][n - 3].size), sal, b);
             else b->zero = 1;
         }
         for (unsigned k = 0; k < 16; k++) {
@@ -3998,6 +4010,7 @@ static void vkd_shutdown(void) {
                (long long)g_sw_n, (double)g_sw_tk * k, (long long)g_sw_lag[0], (long long)g_sw_lag[1], (long long)g_sw_lag[2], (long long)g_sw_lag[3]);
         printf("nvn_vk_syncwait: batches that kept the last batch's compute buffers bound instead of waiting (SMO_VK_CB_CARRY=1): %lld\n", (long long)g_cb_carried);
         printf("nvn_vk_syncwait: game fence waits answered with the previous wait's fence (SMO_VK_FENCE_LATE=1): %lld\n", (long long)g_late_n);
+        printf("nvn_vk_ubo: uniform buffer bytes bound %lld of %lld (SMO_VK_UBO_TRIM=1 binds only what the stages read)\n", (long long)g_ubo_sent, (long long)g_ubo_full);
         printf("nvn_vk_syncwait: timestamp reports deferred to the end of their submission (SMO_VK_REPORT_DEFER=1): %lld\n", (long long)g_rep_deferred);
         printf("nvn_vk_syncwait: compute copy-back syncs by the line of nvn_vk_draw.c that asked:");
         for (int i = 0; i < g_cbs_n; i++) printf(" L%d %lld (%.0f ms)", g_cbs_at[i].line, (long long)g_cbs_at[i].n, (double)g_cbs_at[i].tk * k);

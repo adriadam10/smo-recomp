@@ -21,7 +21,8 @@ typedef struct VStage {
     int stage, code_len, ok; volatile LONG state, cp_state;      /* state: 1 being made, 2 made (ok says how it went); cp_state: compute pipeline 0 none, 1 being made, 2 made */
     int gprim;                                     /* a geometry stage: the primitive class of the draws it serves (MxIn.gs_in_prim; part of hb) */
     uint32_t images_w; uint16_t img_fmt[8]; uint8_t img_type[8];      /* a compute stage's images (MxOut): written ones, declared format and type */
-    uint32_t key[4], fo, in_attr, out_attr, id, cbufs, ssbos, ssbo_w, images, dep, tex_units; int uses_alpha, nsmp, cp_recorded, from_rec, fragonly;      /* fragonly: handed over by a program without a vertex stage */
+    uint32_t key[4], fo, in_attr, out_attr, id, cbufs, ssbos, ssbo_w, images, dep, tex_units; int uses_alpha, nsmp, cp_recorded, from_rec, fragonly;
+    uint16_t cb_words[18]; uint32_t cb_dyn;          /* MxOut's: how much of each constant buffer the stage reads (SMO_VK_UBO_TRIM) */      /* fragonly: handed over by a program without a vertex stage */
     VkPipeline cp; VkPipelineLayout cl; VkDescriptorSetLayout cdl[2];      /* compute stage: its pipeline */
     uint32_t local[3];
     VSmp smp[64];
@@ -30,9 +31,9 @@ typedef struct VStage {
     uint64_t spv; int mod_users, mod_rel;          /* spv: name of the stage's SPIR-V file; the module is used by mod_users threads now and may be released (mod_rel) once its library or compute pipeline is made (stage_mod_get) */
 } VStage;
 #define MX_VK_VERSION 11u                        /* part of every hash: change it when mx_translate's Vulkan text or these records change */
-typedef struct { uint32_t magic; int32_t stage, code_len; uint32_t key[4], fo; uint64_t spv, hb; uint32_t cbufs, ssbos, ssbo_w, images, dep, tex_units, in_attr, out_attr; int32_t uses_alpha, nsmp; VSmp smp[64]; } StageRec;
+typedef struct { uint32_t magic; int32_t stage, code_len; uint32_t key[4], fo; uint64_t spv, hb; uint32_t cbufs, ssbos, ssbo_w, images, dep, tex_units, in_attr, out_attr; int32_t uses_alpha, nsmp; VSmp smp[64]; uint16_t cb_words[18]; uint32_t cb_dyn; } StageRec;
 typedef struct { uint32_t magic, key[4], fo, dep, tex; uint64_t vh; } VarRec;      /* ..\cache\vk\stage\<stage>_<hb>.var: the variants of one code */
-#define STAGEREC_MAGIC (0x52545356u + MX_VK_VERSION)
+#define STAGEREC_MAGIC (0x52545356u + MX_VK_VERSION + 0x100u)      /* + 0x100: records with cb_words / cb_dyn (the SPIR-V and pipeline hashes stay) */
 typedef struct { int stage, code_len, serial; const uint8_t *code, *cdata; uint32_t cdata_size, local[3], smem, lmem; int gprim; /* geometry stage, as VStage */ } SSrc;
 static CRITICAL_SECTION g_sh_lock;
 static CONDITION_VARIABLE g_sh_cv, g_jq_cv;        /* g_sh_cv: something was finished; g_jq_cv: a job was queued */
@@ -213,7 +214,7 @@ static void stage_mod_releasable(VStage *v) {      /* its library or compute pip
 }
 static void vstage_from_rec(VStage *v, const StageRec *r, uint64_t vh, VkShaderModule mod) {
     v->h = vh; v->hb = r->hb; v->code_len = r->code_len; memcpy(v->key, r->key, 16); v->fo = r->fo; v->spv = r->spv;
-    v->cbufs = r->cbufs; v->ssbos = r->ssbos; v->ssbo_w = r->ssbo_w; v->images = r->images; v->dep = r->dep; v->tex_units = r->tex_units; v->in_attr = r->in_attr; v->out_attr = r->out_attr;
+    v->cbufs = r->cbufs; memcpy(v->cb_words, r->cb_words, sizeof v->cb_words); v->cb_dyn = r->cb_dyn; v->ssbos = r->ssbos; v->ssbo_w = r->ssbo_w; v->images = r->images; v->dep = r->dep; v->tex_units = r->tex_units; v->in_attr = r->in_attr; v->out_attr = r->out_attr;
     v->uses_alpha = r->uses_alpha; v->nsmp = r->nsmp; memcpy(v->smp, r->smp, sizeof v->smp);
     v->mod = mod; v->ok = 1;
 }
@@ -288,7 +289,7 @@ static void vstage_build(VStage *v, const SSrc *src) {
             int on_disk;
             v->mod = module_from_glsl(s, out.glsl, what, &spv_hash, &on_disk);
             v->spv = on_disk ? spv_hash : 0;       /* no SPIR-V file: the module is kept (stage_mod_releasable) */
-            v->cbufs = out.cbufs; v->ssbos = out.ssbos; v->ssbo_w = out.ssbo_written; v->images = out.images; v->in_attr = out.in_attr; v->out_attr = out.out_attr;
+            v->cbufs = out.cbufs; for (int k = 0; k < 18; k++) v->cb_words[k] = (uint16_t)(out.cb_words[k] > 65535 ? 65535 : out.cb_words[k]); v->cb_dyn = out.cb_dyn; v->ssbos = out.ssbos; v->ssbo_w = out.ssbo_written; v->images = out.images; v->in_attr = out.in_attr; v->out_attr = out.out_attr;
             v->images_w = out.images_written; memcpy(v->img_fmt, out.image_gl_format, sizeof v->img_fmt); memcpy(v->img_type, out.image_type, sizeof v->img_type);
             v->dep = s == 0 ? out.int_dep : 0; v->tex_units = out.tex_units; v->uses_alpha = out.uses_alpha; v->nsmp = out.nsmp;
             for (int i = 0; i < out.nsmp && i < 64; i++) {
@@ -306,7 +307,7 @@ static void vstage_build(VStage *v, const SSrc *src) {
                 if (v->images) goto no_record;     /* a stage with images has no record (its images' formats and types are not in it; see above) */
                 memset(&r, 0, sizeof r);
                 r.magic = STAGEREC_MAGIC; r.stage = s; r.code_len = v->code_len; memcpy(r.key, v->key, 16); r.fo = v->fo; r.spv = spv_hash; r.hb = v->hb;
-                r.cbufs = v->cbufs; r.ssbos = v->ssbos; r.ssbo_w = v->ssbo_w; r.images = v->images; r.dep = v->dep; r.tex_units = v->tex_units; r.in_attr = v->in_attr; r.out_attr = v->out_attr;
+                r.cbufs = v->cbufs; memcpy(r.cb_words, v->cb_words, sizeof r.cb_words); r.cb_dyn = v->cb_dyn; r.ssbos = v->ssbos; r.ssbo_w = v->ssbo_w; r.images = v->images; r.dep = v->dep; r.tex_units = v->tex_units; r.in_attr = v->in_attr; r.out_attr = v->out_attr;
                 r.uses_alpha = v->uses_alpha; r.nsmp = v->nsmp; memcpy(r.smp, v->smp, sizeof r.smp);
                 snprintf(path, sizeof path, "%s/stage/%d_%016llx.st", vkc_dir(), s, (unsigned long long)v->h);
                 if ((fp = fopen(path, "wb")) != NULL) { fwrite(&r, 1, sizeof r, fp); fclose(fp); }

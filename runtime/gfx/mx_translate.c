@@ -30,6 +30,7 @@ typedef struct {
     char *s; size_t len, cap;                 /* body being emitted */
     int fail; char why[200], failop[40];
     uint32_t cbufs, in_attr, out_attr, tex_units, clip_out, ssbos;
+    uint32_t cb_words[18], cb_dyn;   /* per constant buffer: 1 + the highest word read at a constant index; read at an index computed at run time */
     uint8_t regs[256], preds[8], in_comp[32], in_mode[32];
     int uses_gmem, uses_gstore, uses_cc, uses_layer_out, uses_vp_out, uses_psize, uses_lmem, insns, blocks, any_jump, uses_alpha;
     uint8_t *reach, *leader;
@@ -104,10 +105,11 @@ static const char *CB(Mx *e, uint64_t i) {                /* c[bits 34..38][bits
          * buffer slots only, so the game's compiler reaches the uniform buffers that do not fit (seen: 6, 7, 8) through global
          * memory (LDG). Tag 17 + n; mx_ldg reads the same block the constant buffer path uses (c3 + n). */
         unsigned n = (w - 0x210 / 4) / 4, f = (w - 0x210 / 4) & 3;
-        if (f == 0) { e->gubos |= 1u << n; e->cbufs |= 1u << (3 + n); return S(e, "0x%08xu", (17 + n) << 27); }
+        if (f == 0) { e->gubos |= 1u << n; e->cbufs |= 1u << (3 + n); e->cb_dyn |= 1u << (3 + n); return S(e, "0x%08xu", (17 + n) << 27); }
         return f == 2 ? "0x07fffffcu" : "0u";
     }
     e->cbufs |= 1u << b;
+    if (b < 18 && w + 1 > e->cb_words[b]) e->cb_words[b] = w + 1;
     return S(e, "c%u[%uu]", b, w);
 }
 static const char *I20(Mx *e, uint64_t i) { uint32_t v = MXB(i, 20, 19); if (MXB(i, 56, 1)) v |= 0xfff80000u; return S(e, "0x%08xu", v); }
@@ -587,7 +589,7 @@ static int bindless_unit(Mx *e, unsigned pc, unsigned h, const char *name) {
             return (int)(off - 8) / 2;
         }
         if (e->in->target == 1 && cb >= 3 && cb < 18 && !(off & 1) && off < 16) {
-            e->cbufs |= 1u << cb;
+            e->cbufs |= 1u << cb; e->cb_dyn |= 1u << cb;      /* the back end reads the handle from the buffer */
             return 32 + (int)(cb * 8 + off / 2);
         }
         break;
@@ -1190,7 +1192,7 @@ static void insn(Mx *e, unsigned pc, uint64_t i) {
         unsigned cb = MXB(i, 36, 5), sz = MXB(i, 48, 3), mode = MXB(i, 44, 2), rd = MXB(i, 0, 8);
         int off = (int)(int16_t)MXB(i, 20, 16);
         if (mode != 0) { fail(e, "LDC.IS", "LDC mode %u", mode); break; }
-        e->cbufs |= 1u << cb;
+        e->cbufs |= 1u << cb; e->cb_dyn |= 1u << cb;
         emit(e, "uint ad = %s + 0x%08xu, w = c%u[ad >> 2];", A8, (uint32_t)off, cb);
         switch (sz) {
         case 0: emit(e, " %s = bitfieldExtract(w, int((ad & 3u) * 8u), 8);", DST); break;
@@ -2015,7 +2017,7 @@ int mx_translate(const MxIn *in, MxOut *out) {
         free(h.s);
     }
     out->glsl = res;
-    out->cbufs = e->cbufs; out->in_attr = e->in_attr; out->out_attr = e->out_attr; out->tex_units = e->tex_units;
+    out->cbufs = e->cbufs; memcpy(out->cb_words, e->cb_words, sizeof out->cb_words); out->cb_dyn = e->cb_dyn; out->in_attr = e->in_attr; out->out_attr = e->out_attr; out->tex_units = e->tex_units;
     out->int_dep = in->stage == MX_VERTEX ? e->in_attr : e->tex_units;
     out->ssbos = e->ssbos; out->ssbo_written = e->uses_gstore ? e->ssbos : 0;
     out->images = e->images; out->images_read = e->images_read; out->images_written = e->images_written;
