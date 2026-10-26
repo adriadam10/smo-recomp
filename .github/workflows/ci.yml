@@ -1,0 +1,39 @@
+name: ci
+
+# Checks that need no game dump. Linux: runtime/core and the rest of the runtime compiled with -Werror, and their
+# self-tests (Win32 shim, crash report, time zones, save journal, controllers on SDL3's virtual pads, sockets, core model,
+# virtual memory pools, vertex layout, FreeType glyphs). Python: every tool and script compiles.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-runtime:
+    runs-on: ubuntu-latest
+    container: archlinux:latest           # SDL3 3.4, shaderc and FFmpeg as packages
+    steps:
+      - name: Packages
+        run: |
+          pacman -Syu --noconfirm --needed git clang lld pkgconf python python-pillow sdl3 vulkan-headers vulkan-icd-loader \
+            shaderc freetype2 ffmpeg openssl fontconfig noto-fonts noto-fonts-cjk tzdata
+      - uses: actions/checkout@v7
+      - name: Mark the checkout safe for git (the container runs as root)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Runtime checks
+        run: tests/linux/check_runtime.sh
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Every tool, script and test compiles
+        run: python -m compileall -q tools scripts tests
