@@ -2534,7 +2534,11 @@ static int hud_fix(uint64_t addr, uint64_t size, BufRef *b) {
     if (!(g[8] == 0 && g[9] == 0 && fabsf(g[10] + 1.0002f) < 1e-4f && fabsf(g[11] - 2733.02f) < 0.05f && g[12] == 0 && g[13] == 0 && g[14] == -1 && fabsf(g[15] - 2734.47f) < 0.05f)) return 0;
     int tall = sh < 1.0f;
     float edge = 0;                                /* -1 / +1: the pane reaches the bottom (left) / top (right) edge */
-    if (size >= 136 * 4) {                         /* the pane's corners in normalized device coordinates */
+    /* A frame that draws no scene (the controller and loading screens, the title's menus) is a 2D screen laid out for
+     * 16:9: all of it goes into the 16:9 box, with bars, as on a 16:9 screen (with the rules below its rows came apart:
+     * text as wide as the screen anchored to an edge, its pictures in the box). In play the scene fills the window and
+     * the rules below fit the HUD over it. (g_in_scene: the last frame had compute dispatches.) */
+    if (size >= 136 * 4 && g_in_scene) {                         /* the pane's corners in normalized device coordinates */
         const float *mv = g + 16, *rc = g + 132;
         float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
         for (int k = 0; k < 4 && rc[0] > 0 && rc[1] > 0; k++) {
@@ -2549,11 +2553,18 @@ static int hud_fix(uint64_t addr, uint64_t size, BufRef *b) {
          * stays in the 16:9 box, so a 2D screen keeps its layout whole (a pane over the whole height only - the side
          * panel of the controller screen - stretched alone and the screen came apart) */
         if (lo[0] <= -0.99f && hi[0] >= 0.99f && lo[1] <= -0.99f && hi[1] >= 0.99f) return 0;
-        /* a band over the whole width (height) that reaches an edge - the dark band behind the hints at the bottom -
-         * keeps that edge: anchored to it rather than to the middle, it leaves no strip of the picture without it.
-         * Smaller panes near an edge (the moon counter's digits) stay with the rest of the 16:9 box. */
+        /* A pane as wide as the screen (as tall, on a wider window) - measured by its size: the title's map slides in
+         * from the side in two halves - is a background or a band. Over nearly the whole height: a background,
+         * stretched with the window. Touching an edge - the dark band behind the hints, the loading screen's band at the
+         * bottom: anchored to that edge rather than to the middle. Anything else stays with the 16:9 box: a band that
+         * merely lies in the lower half is often a row of text as wide as the screen (the controller screen's), whose
+         * pictures are in the box (anchoring all of the lower half took its text off its pictures). Known miss: the
+         * loading screen's thin line just above its band stays in the box, a few pixels above the band. */
         int a = tall ? 1 : 0;
-        if (lo[1 - a] <= -0.99f && hi[1 - a] >= 0.99f) { if (lo[a] <= -0.99f) edge = -1; else if (hi[a] >= 0.99f) edge = 1; }
+        if (hi[1 - a] - lo[1 - a] >= 1.98f) {
+            if (lo[a] <= -0.9f && hi[a] >= 0.9f) return 0;
+            if (lo[a] <= -0.99f) edge = -1; else if (hi[a] >= 0.99f) edge = 1;
+        }
     }
     static float buf[0x10000 / 4];
     uint64_t n = size > sizeof buf ? sizeof buf : size;
@@ -4091,6 +4102,24 @@ swap: ;
             b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.dstSubresource = b.srcSubresource;
             b.srcOffsets[0].x = s4[0]; b.srcOffsets[0].y = s4[1]; b.srcOffsets[1].x = s4[0] + s4[2]; b.srcOffsets[1].y = s4[1] + s4[3]; b.srcOffsets[1].z = 1;
             b.dstOffsets[1].x = (int32_t)V.extent.width; b.dstOffsets[1].y = (int32_t)V.extent.height; b.dstOffsets[1].z = 1;
+            {   /* A 2D screen (no scene in the frame) on a window taller than 16:9: its layout is in the 16:9 box (hud_fix);
+                 * only that band of the picture is shown, the rest black, so what the world's taller view adds around
+                 * it (the title's 3D Mario below the menu) does not spill into the bars. */
+                float smo_aspect_shape(void);
+                float shp = smo_aspect_shape();
+                if (shp < 1.0f && !g_in_scene && !progress) {
+                    VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f;
+                    vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr);
+                    VkImageMemoryBarrier wb = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                    wb.srcQueueFamilyIndex = wb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; wb.image = V.images[index]; wb.subresourceRange = sr;
+                    wb.srcAccessMask = wb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; wb.oldLayout = wb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &wb);
+                    float m = (1.0f - shp) / 2.0f;
+                    int sh0 = b.srcOffsets[1].y - b.srcOffsets[0].y;
+                    b.srcOffsets[0].y += (int32_t)(m * (float)sh0 + 0.5f); b.srcOffsets[1].y -= (int32_t)(m * (float)sh0 + 0.5f);
+                    b.dstOffsets[0].y = (int32_t)(m * (float)V.extent.height + 0.5f); b.dstOffsets[1].y = (int32_t)V.extent.height - b.dstOffsets[0].y;
+                }
+            }
             vkCmdBlitImage(R.cmd, vt->img, LAYOUT(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL), V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
         } else { VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f; vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr); }
         overlay_draw(index);
