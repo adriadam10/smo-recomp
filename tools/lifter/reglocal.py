@@ -33,13 +33,13 @@ CHECK = os.environ.get('RECOMP_REG_LOCALS_CHECK', '0') == '1'
 
 _REG = re.compile(r'c->x\[(\d+)\]')
 _WRITE = re.compile(r'c->x\[(\d+)\] (?:[-+*/%&|^]|<<|>>)?=(?!=)')
-_CALL = r'(?:(?:f_[0-9a-f]+|imp_\w+|h_\w+)\(c\);|call_indirect\(c, \w+\);|ic_call\(c, t, ic_[0-9a-f]+, 0x[0-9a-f]+ULL\);|host_import\(c, \d+\);' \
+_CALL = r'(?:(?:f_[0-9a-f]+|imp_\w+|h_\w+)\(c\);|call_indirect\(c, \w+\);|ic_call\(c, t, &ic_[0-9a-f]+, 0x[0-9a-f]+ULL\);|host_import\(c, \d+\);' \
         r'|guest_svc\(c, 0x[0-9a-f]+\);|guest_(?:trap|unimpl)\([^;]*\);' \
         r'|sdk_host_call\(c, \d+\);|sdk_longjmp\(c\);|sdk_trap_call\(c, "[^"]*"\);|SDK_SETJMP\(c\);)'   # sdklift.py
 # everything that leaves the function or lets other code read the context; a following `return;` is a tail call
 _EXIT = re.compile(_CALL + r'(?: return;)?|\breturn;|goto L_dispatch;')
 # a line that is one call and nothing conditional (BL, BLR, an import): the context is in step after it
-_PLAIN_CALL = re.compile(r'^(?:L_[0-9a-f]+: )?\s*(?:\{ (?:static uint64_t ic_[0-9a-f]+\[2\]; )?uint64_t t = [^;]*; )?(?:c->x\[30\] = 0x[0-9a-f]+ULL; )?'
+_PLAIN_CALL = re.compile(r'^(?:L_[0-9a-f]+: )?\s*(?:\{ (?:static uint64_t ic_[0-9a-f]+; )?uint64_t t = [^;]*; )?(?:c->x\[30\] = 0x[0-9a-f]+ULL; )?'
                          + _CALL + r'(?: \})?$')
 _LABEL = re.compile(r'^(L_[0-9a-f]+|L_dispatch):')
 _GOTO = re.compile(r'goto (L_[0-9a-f]+|L_dispatch);')
