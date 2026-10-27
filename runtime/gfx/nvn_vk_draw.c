@@ -357,6 +357,7 @@ static LONG64 g_ts_n;
  * was a play frame (compute dispatches and more than 120 draws): median / p99 of the play frames at exit ("nvn_vk_gpu_play:"). */
 #define FRSTAT_N 40000
 static float g_fr_gpu[FRSTAT_N], g_fr_wall[FRSTAT_N];
+static LONG64 g_fr_t[FRSTAT_N];                    /* SMO_FRAMECSV: when the frame was presented (POSIX: CLOCK_MONOTONIC in ns, the clock of perf record -k monotonic) */
 static uint8_t g_fr_play[FRSTAT_N];
 static uint16_t g_fr_vpw[FRSTAT_N], g_fr_vph[FRSTAT_N];      /* SMO_FRAMECSV: the viewport of the frame's main 3D pass (the pass with a depth target and the most draws): the game's dynamic resolution */
 static uint32_t g_fr_vpdraws[FRSTAT_N];
@@ -1245,6 +1246,10 @@ static int mem_is_zero(const uint8_t *p, size_t n) {       /* 64 bytes at a time
     }
     for (; k < n; k++) if (p[k]) return 0;
     return 1;
+}
+/* hostrt.c report_and_exit too: a run that ends with its sequence (SMO_SEQ_EXIT) never shuts the drawing part down */
+void nvn_vk_zero_skip_report(FILE *out) {
+    fprintf(out, "nvn_vk: new textures of CPU_NO_ACCESS pools whose memory was all zero, not read out (SMO_VK_ZERO_SKIP): %lld of %lld looked at (%lld MB)\n", (long long)g_zs_skips, (long long)g_zs_checked, (long long)(g_zs_bytes >> 20));
 }
 static VTex *vt_get2(Tex *t, int sync) {
     VTex *vt = t->vk;
@@ -4405,6 +4410,11 @@ swap: ;
         if (frame >= 0 && frame < FRSTAT_N) {
             LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
             g_fr_play[frame] = (uint8_t)play;
+#ifdef _WIN32
+            g_fr_t[frame] = t_now;
+#else
+            { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); g_fr_t[frame] = (LONG64)ts.tv_sec * 1000000000ll + ts.tv_nsec; }      /* perf record -k monotonic (the kernel takes no monotonic_raw for perf) */
+#endif
             g_fr_wall[frame] = t_prev ? (float)((double)(t_now - t_prev) * 1000.0 / (double)fq.QuadPart) : 0.0f;
         }
         t_prev = t_now;
@@ -4593,9 +4603,10 @@ static void frstat_csv(void) {
     if (!path || !*path) return;
     FILE *f = fopen(path, "w");
     if (!f) { printf("nvn_vk: SMO_FRAMECSV: cannot write %s\n", path); return; }
-    fprintf(f, "frame,play,wall_ms,gpu_ms,vp_w,vp_h\n");
+    LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+    fprintf(f, "frame,play,wall_ms,gpu_ms,vp_w,vp_h,t_s\n");
     for (long long i = 0; i < g_cur_frame && i < FRSTAT_N; i++)
-        fprintf(f, "%lld,%d,%.3f,%.3f,%u,%u\n", i, g_fr_play[i], (double)g_fr_wall[i], (double)g_fr_gpu[i], g_fr_vpw[i], g_fr_vph[i]);
+        fprintf(f, "%lld,%d,%.3f,%.3f,%u,%u,%.6f\n", i, g_fr_play[i], (double)g_fr_wall[i], (double)g_fr_gpu[i], g_fr_vpw[i], g_fr_vph[i], (double)g_fr_t[i] / (double)fq.QuadPart);      /* QueryPerformanceFrequency: ns on POSIX too */
     fclose(f);
     printf("nvn_vk: SMO_FRAMECSV: %lld frames written to %s\n", (long long)(g_cur_frame < FRSTAT_N ? g_cur_frame : FRSTAT_N), path);
 }
@@ -4672,7 +4683,7 @@ static void vkd_shutdown(void) {
            (long long)g_vtx_over, g_vtxgrow > 0 ? " (copied as far as they read)" : g_vtxgrow == 0 ? " (SMO_VK_VTXGROW=0: left as bound)" : "", (long long)g_vtx_capped, (long long)g_imax_scans);
     printf("nvn_vk: texture barriers (nvnCommandBufferBarrier, order fragments): %lld, %lld of them inside a pass that samples its own target (the pass ended there), %lld inside other passes (nothing to do)\n", (long long)g_texbar, (long long)g_texbar_split, (long long)g_texbar_skip);
     printf("nvn_vk: stream ring: %lld wraps, %lld waits for a submission still reading the part about to be written%s; %llu MB, largest range %llu KB\n", (long long)R.ring_wraps, (long long)g_ring_waits, g_ring_drain > 0 ? " (SMO_VK_RING_DRAIN=1: every wrap waited for the GPU)" : "", (unsigned long long)(R.ring_size >> 20), (unsigned long long)(g_ring_max_n >> 10));
-    printf("nvn_vk: new textures of CPU_NO_ACCESS pools whose memory was all zero, not read out (SMO_VK_ZERO_SKIP): %lld of %lld looked at (%lld MB)\n", (long long)g_zs_skips, (long long)g_zs_checked, (long long)(g_zs_bytes >> 20));
+    nvn_vk_zero_skip_report(stdout);
     printf("nvn_vk: images: %lld textures made with storage use (NVN_TEXTURE_FLAGS_IMAGE), %lld storage views, %lld dispatches that wrote images; draws with a geometry stage: %lld (%lld pipelines); indirect: %lld draws, %lld dispatches\n", (long long)g_storage_tex, (long long)g_img_views, (long long)g_img_disp, (long long)g_gs_draws, (long long)g_gs_pipes, (long long)g_indirect_draws, (long long)g_indirect_disp);
     printf("nvn_vk: textures nothing names (agl gave up their pool slots; SMO_VK_TEXFREE=%d frames unused): %lld images freed (%lld MB), %d waiting at the end, %lld used again after their image went (made again), %lld first used after\n",
            texfree_frames(), (long long)g_rc_freed, (long long)g_rc_freed_mb, g_rc_n, (long long)g_rc_again, (long long)g_rc_late);

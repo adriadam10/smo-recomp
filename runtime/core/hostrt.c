@@ -572,6 +572,9 @@ void report_and_exit(int code) {
     { void smo_heap_report(FILE *out); smo_heap_report(stdout); }   /* smo_nn.c */
     { void smo_audio_report(FILE *out); smo_audio_report(stdout); }   /* smo_audio.c */
     { void smo_fast_report(FILE *out); smo_fast_report(stdout); }     /* smo_fast.c */
+    { void smo_yaz0_report(FILE *out); smo_yaz0_report(stdout); }     /* smo_yaz0.c */
+    { void smo_sharc_report(FILE *out); smo_sharc_report(stdout); }   /* smo_sharc.c */
+    { void nvn_vk_zero_skip_report(FILE *out); nvn_vk_zero_skip_report(stdout); }   /* nvn_vk_draw.c */
     { void nerve_report(FILE *out); nerve_report(stdout); }   /* smo_nerve.c */
     { void fontll_report(FILE *out); fontll_report(stdout); }   /* nnfontll.c */
     icall_dump(stdout, 0);                                          /* SMO_ICALLS: the window's indirect calls at a normal exit too */
