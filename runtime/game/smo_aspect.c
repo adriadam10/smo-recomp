@@ -77,9 +77,10 @@ void rt_persp(uint64_t proj, uint32_t *tan_fovy, uint32_t *aspect) {
     a *= s;
     if (s < 1.0f) t /= s;                          /* taller than 16:9: the width kept, more height */
     memcpy(tan_fovy, &t, 4); memcpy(aspect, &a, 4);
-    /* Written back (with fovy and its sine and cosine at +0xa0, +0xa4, +0xa8): the game's other uses of the view, the
-     * culling of what is near the edges among them, see the view that is drawn. With the matrix alone, the ground at
-     * the bottom of a 16:10 window was missing (the strip the taller view adds). SMO_ASPECT_WRITE=0: the matrix only. */
+    /* Written back (with fovy and its sine and cosine at +0xa0, +0xa4, +0xa8), so the game's other uses of the view see
+     * the one that is drawn, as Savage Wind does for its world camera (there, its shadow cascades). Here no difference
+     * was seen: 16:10 screenshots with and without differ by 0.4-2.9 grey levels on average (Metro, frames 1800-2400),
+     * moving things between two runs. SMO_ASPECT_WRITE=0: the matrix only. */
     static int write = -1;
     if (write < 0) write = !(getenv("SMO_ASPECT_WRITE") && !atoi(getenv("SMO_ASPECT_WRITE")));
     if (write) {
