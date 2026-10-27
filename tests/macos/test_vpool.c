@@ -71,9 +71,11 @@ static uint64_t call(const char *name, uint64_t a0, uint64_t a1, uint64_t a2) {
     fn(name)(&c);
     return c.x[0];
 }
-static uint64_t g_key = 0x100000;                                   /* guest objects: only their addresses matter */
+/* guest objects (a builder and a pool, 0x100 bytes each, as NVNmemoryPool): the runtime keeps a pool's state inside it */
+static _Alignas(16) uint8_t g_objs[64][0x100];
+static int g_nobj;
 static uint64_t pool(uint64_t memory, uint64_t size, uint64_t flags) {
-    uint64_t b = g_key += 0x100, p = g_key += 0x100;
+    uint64_t b = (uint64_t)(uintptr_t)g_objs[g_nobj++], p = (uint64_t)(uintptr_t)g_objs[g_nobj++];
     call("nvnMemoryPoolBuilderSetDefaults", b, 0, 0);
     call("nvnMemoryPoolBuilderSetStorage", b, memory, size);
     call("nvnMemoryPoolBuilderSetFlags", b, flags, 0);
