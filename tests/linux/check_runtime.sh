@@ -24,7 +24,7 @@ tests/macos/check_core.sh || fail=1
 RELAXED=(-Wno-unused-variable -Wno-logical-op-parentheses -Wno-switch -Wno-misleading-indentation -Wno-unknown-pragmas -Wno-format)
 for d in libc os fs game input services gfx audio compat; do
     for f in runtime/$d/*.c; do
-        case "$f" in */nvn_vk_draw.c|*/nvn_vk_pipelines.c|*/nvn_vk_vlayout.c|*/nvn_vk_watchdog.c) continue ;; esac
+        case "$f" in */nvn_vk_draw.c|*/nvn_vk_pipelines.c|*/nvn_vk_vlayout.c|*/nvn_vk_watchdog.c|*/nvn_vk_rec.c) continue ;; esac
         extra=(); case "$d" in gfx|audio|os|libc|services) extra=("${RELAXED[@]}") ;; esac
         log="$OUT/$(basename "$f" .c).log"
         "$CC" "${CFLAGS[@]}" ${extra[@]+"${extra[@]}"} -Werror "${INC[@]}" -c "$f" -o "$OUT/$(basename "$f" .c).o" >"$log" 2>&1

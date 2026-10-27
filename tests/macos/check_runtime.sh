@@ -20,12 +20,12 @@ tests/macos/check_core.sh || fail=1
 
 # gfx/ and audio/ carry style warnings of their own (unused variables, && within ||, switches over part of an enum),
 # hidden in the real build (-w); these folders are compiled without them. nvn_vk_draw.c, nvn_vk_pipelines.c,
-# nvn_vk_vlayout.c and nvn_vk_watchdog.c are part of nvn_vk.c.
+# nvn_vk_vlayout.c, nvn_vk_watchdog.c and nvn_vk_rec.c are part of nvn_vk.c.
 RELAXED=(-Wno-unused-variable -Wno-logical-op-parentheses -Wno-switch -Wno-misleading-indentation -Wno-unknown-pragmas)
 INC+=(-I"$HOME/VulkanSDK/1.4.363.0/macOS/include")
 for d in "${FOLDERS[@]}" gfx audio compat; do
     for f in runtime/$d/*.c; do
-        case "$f" in */nvn_vk_draw.c|*/nvn_vk_pipelines.c|*/nvn_vk_vlayout.c|*/nvn_vk_watchdog.c) continue ;; esac
+        case "$f" in */nvn_vk_draw.c|*/nvn_vk_pipelines.c|*/nvn_vk_vlayout.c|*/nvn_vk_watchdog.c|*/nvn_vk_rec.c) continue ;; esac
         extra=(); case "$d" in gfx|audio) extra=("${RELAXED[@]}") ;; esac
         log="$OUT/$(basename "$f" .c).log"
         "$CC" -std=gnu11 -O1 -g -Wall -Wno-unused-function -Wno-unused-but-set-variable ${extra[@]+"${extra[@]}"} -Werror "${INC[@]}" -c "$f" -o "$OUT/$(basename "$f" .c).o" >"$log" 2>&1
