@@ -2561,6 +2561,7 @@ static int hud_fix(uint64_t addr, uint64_t size, BufRef *b) {
          * pictures are in the box (anchoring all of the lower half took its text off its pictures). Known miss: the
          * loading screen's thin line just above its band stays in the box, a few pixels above the band. */
         int a = tall ? 1 : 0;
+        if (!tall && hi[0] - lo[0] >= 1.98f) return 0;      /* wider than 16:9: a band as wide as the screen stretches to the window's width */
         if (hi[1 - a] - lo[1 - a] >= 1.98f) {
             if (lo[a] <= -0.9f && hi[a] >= 0.9f) return 0;
             if (lo[a] <= -0.99f) edge = -1; else if (hi[a] >= 0.99f) edge = 1;
@@ -4102,22 +4103,29 @@ swap: ;
             b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.dstSubresource = b.srcSubresource;
             b.srcOffsets[0].x = s4[0]; b.srcOffsets[0].y = s4[1]; b.srcOffsets[1].x = s4[0] + s4[2]; b.srcOffsets[1].y = s4[1] + s4[3]; b.srcOffsets[1].z = 1;
             b.dstOffsets[1].x = (int32_t)V.extent.width; b.dstOffsets[1].y = (int32_t)V.extent.height; b.dstOffsets[1].z = 1;
-            {   /* A 2D screen (no scene in the frame) on a window taller than 16:9: its layout is in the 16:9 box (hud_fix);
-                 * only that band of the picture is shown, the rest black, so what the world's taller view adds around
-                 * it (the title's 3D Mario below the menu) does not spill into the bars. */
+            {   /* A 2D screen (no scene in the frame) on a window that is not 16:9: its layout is in the 16:9 box (hud_fix);
+                 * only that part of the picture is shown, the rest black, so what the world's wider or taller view adds
+                 * around it (the title's 3D Mario below the menu, the loading screen's icon) does not spill into the bars. */
                 float smo_aspect_shape(void);
                 float shp = smo_aspect_shape();
-                if (shp < 1.0f && !g_in_scene && !progress) {
+                if (shp != 1.0f && !g_in_scene && !progress) {
                     VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f;
                     vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr);
                     VkImageMemoryBarrier wb = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
                     wb.srcQueueFamilyIndex = wb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; wb.image = V.images[index]; wb.subresourceRange = sr;
                     wb.srcAccessMask = wb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; wb.oldLayout = wb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                     vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &wb);
-                    float m = (1.0f - shp) / 2.0f;
-                    int sh0 = b.srcOffsets[1].y - b.srcOffsets[0].y;
-                    b.srcOffsets[0].y += (int32_t)(m * (float)sh0 + 0.5f); b.srcOffsets[1].y -= (int32_t)(m * (float)sh0 + 0.5f);
-                    b.dstOffsets[0].y = (int32_t)(m * (float)V.extent.height + 0.5f); b.dstOffsets[1].y = (int32_t)V.extent.height - b.dstOffsets[0].y;
+                    if (shp < 1.0f) {                  /* taller: the middle rows */
+                        float m = (1.0f - shp) / 2.0f;
+                        int sh0 = b.srcOffsets[1].y - b.srcOffsets[0].y;
+                        b.srcOffsets[0].y += (int32_t)(m * (float)sh0 + 0.5f); b.srcOffsets[1].y -= (int32_t)(m * (float)sh0 + 0.5f);
+                        b.dstOffsets[0].y = (int32_t)(m * (float)V.extent.height + 0.5f); b.dstOffsets[1].y = (int32_t)V.extent.height - b.dstOffsets[0].y;
+                    } else {                           /* wider: the middle columns */
+                        float m = (1.0f - 1.0f / shp) / 2.0f;
+                        int sw0 = b.srcOffsets[1].x - b.srcOffsets[0].x;
+                        b.srcOffsets[0].x += (int32_t)(m * (float)sw0 + 0.5f); b.srcOffsets[1].x -= (int32_t)(m * (float)sw0 + 0.5f);
+                        b.dstOffsets[0].x = (int32_t)(m * (float)V.extent.width + 0.5f); b.dstOffsets[1].x = (int32_t)V.extent.width - b.dstOffsets[0].x;
+                    }
                 }
             }
             vkCmdBlitImage(R.cmd, vt->img, LAYOUT(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL), V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
