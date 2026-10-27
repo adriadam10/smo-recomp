@@ -4131,8 +4131,49 @@ swap: ;
             vkCmdBlitImage(R.cmd, vt->img, LAYOUT(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL), V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
         } else { VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f; vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr); }
         overlay_draw(index);
+        /* SMO_SWAPSHOT=<frame> (debug aid): the window's image as presented in that frame, to <SMO_SHOT_DIR>/swap_<frame>.bmp
+         * (the game's own screenshots are its picture before the present: they do not show what the present does) */
+        static int swf = -2;
+        if (swf == -2) swf = getenv("SMO_SWAPSHOT") ? atoi(getenv("SMO_SWAPSHOT")) : -1;
+        VkBuffer swbuf = NULL; VMem swmem; memset(&swmem, 0, sizeof swmem);
+        if (swf >= 0 && frame == swf && !progress) {
+            VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            VkMemoryRequirements rq;
+            bi.size = (VkDeviceSize)V.extent.width * V.extent.height * 4; bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            VKC(vkCreateBuffer(V.device, &bi, NULL, &swbuf));
+            vkGetBufferMemoryRequirements(V.device, swbuf, &rq);
+            swmem = vmem_alloc(rq, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 1);
+            VKC(vkBindBufferMemory(V.device, swbuf, swmem.mem, swmem.off));
+            image_barrier(V.images[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy c; memset(&c, 0, sizeof c);
+            c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; c.imageSubresource.layerCount = 1;
+            c.imageExtent.width = V.extent.width; c.imageExtent.height = V.extent.height; c.imageExtent.depth = 1;
+            vkCmdCopyImageToBuffer(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swbuf, 1, &c);
+            image_barrier(V.images[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        } else
         image_barrier(V.images[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         cmd_submit(acq, rend);
+        if (swbuf) {
+            cmd_wait_all();
+            char path[400]; const char *dir = getenv("SMO_SHOT_DIR");
+            snprintf(path, sizeof path, "%s%sswap_%lld.bmp", dir ? dir : "", dir ? "/" : "", (long long)frame);
+            int w = (int)V.extent.width, h = (int)V.extent.height, bgr = V.format.format == VK_FORMAT_B8G8R8A8_UNORM || V.format.format == VK_FORMAT_B8G8R8A8_SRGB;
+            uint32_t row = ((uint32_t)w * 3 + 3) & ~3u, fsize = 54 + row * (uint32_t)h, v;
+            uint8_t head[54] = {'B', 'M'}, *img = malloc((size_t)row * h);
+            FILE *f = img ? fopen(path, "wb") : NULL;
+            if (f) {
+                memcpy(head + 2, &fsize, 4); v = 54; memcpy(head + 10, &v, 4); v = 40; memcpy(head + 14, &v, 4); memcpy(head + 18, &w, 4); memcpy(head + 22, &h, 4); head[26] = 1; head[28] = 24;
+                for (int y = 0; y < h; y++) {
+                    const uint8_t *src = (const uint8_t *)swmem.map + (size_t)(h - 1 - y) * w * 4;
+                    uint8_t *d = img + (size_t)y * row;
+                    for (int x = 0; x < w; x++) { d[x * 3] = src[x * 4 + (bgr ? 0 : 2)]; d[x * 3 + 1] = src[x * 4 + 1]; d[x * 3 + 2] = src[x * 4 + (bgr ? 2 : 0)]; }
+                }
+                fwrite(head, 1, 54, f); fwrite(img, 1, (size_t)row * h, f); fclose(f);
+                printf("nvn_vk: SMO_SWAPSHOT: the window's image of frame %lld saved to %s (%dx%d)\n", (long long)frame, path, w, h);
+            }
+            free(img);
+            vkDestroyBuffer(V.device, swbuf, NULL); vmem_free(swmem);
+        }
         VkPresentInfoKHR pr = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         pr.waitSemaphoreCount = 1; pr.pWaitSemaphores = &rend; pr.swapchainCount = 1; pr.pSwapchains = &V.swapchain; pr.pImageIndices = &index;
         g_wd_where = 4;
