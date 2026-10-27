@@ -230,7 +230,11 @@ void ic_fill(Ctx *c, uint64_t addr, uint64_t *site) {
         addr != g_nerve_watch[0] && addr != g_nerve_watch[1] && addr != g_stage_init && addr != g_stage_play) {
         for (unsigned h = fn_hash(addr) & g_fn_mask; g_fn_hash[h].addr; h = (h + 1) & g_fn_mask)
             if (g_fn_hash[h].addr == addr) {
-                if (g_fn_hidx[h] < 65536) __atomic_store_n(site, (addr - GUEST_BASE) << 32 | (uint64_t)g_fn_hidx[h] << 16 | (ep & 0xffff), __ATOMIC_RELAXED);
+                if (g_fn_hidx[h] < 65536) {           /* newest first; the entry it replaces moves to the second place if still current */
+                    uint64_t k = __atomic_load_n(&site[0], __ATOMIC_RELAXED);
+                    if ((uint16_t)k == (ep & 0xffff)) __atomic_store_n(&site[1], k, __ATOMIC_RELAXED);
+                    __atomic_store_n(&site[0], (addr - GUEST_BASE) << 32 | (uint64_t)g_fn_hidx[h] << 16 | (ep & 0xffff), __ATOMIC_RELAXED);
+                }
                 break;
             }
     }
@@ -574,6 +578,7 @@ void report_and_exit(int code) {
     { void smo_fast_report(FILE *out); smo_fast_report(stdout); }     /* smo_fast.c */
     { void nerve_report(FILE *out); nerve_report(stdout); }   /* smo_nerve.c */
     { void fontll_report(FILE *out); fontll_report(stdout); }   /* nnfontll.c */
+    icall_dump(stdout, 0);                                          /* SMO_ICALLS: the window's indirect calls at a normal exit too */
     if (g_trace) { print_import_summary(g_trace); print_hostfn_summary(g_trace); fclose(g_trace); }
     fflush(stdout);
     ExitProcess((UINT)code);

@@ -44,6 +44,7 @@ static PFN_vkGetPhysicalDeviceProperties2 vkGetPhysicalDeviceProperties2;
 static PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
 static PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties;
 static PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
+static PFN_vkGetCalibratedTimestampsKHR vkGetCalibratedTimestamps;      /* KHR or EXT (the same call); NULL without either */
 #define VKC(call) do { VkResult r_ = (call); if (r_ != VK_SUCCESS) vk_fatal(#call, r_); } while (0)
 
 static struct {
@@ -56,6 +57,7 @@ static struct {
     const char *exts[24]; uint32_t next;
     int has_vids, has_cbc, has_pv, has_iu8, has_plr, has_vad, has_push, has_eds3, debug;
     int has_gpl, ext_gpl, ext_so;
+    int cal;                                       /* calibrated timestamps: 1 VK_KHR_, 2 VK_EXT_, 0 none (report times, rep_gpu_time) */
     int has_dcc;                                   /* VK_EXT_depth_clip_control (NVN depth mode NEAR_IS_MINUS_W) */
     int has_emh; uint64_t emh_align;              /* VK_EXT_external_memory_host (SMO_VK_HOSTMEM) */
     VkPhysicalDeviceMemoryProperties mp;
@@ -117,6 +119,8 @@ static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties 
 #undef EXT
     if (has_name(dext, ndext, "VK_EXT_external_memory_host")) { D.has_emh = 1; D.exts[D.next++] = "VK_EXT_external_memory_host"; }
     if (has_name(dext, ndext, "VK_KHR_push_descriptor") && !(getenv("SMO_VK_PUSH") && !atoi(getenv("SMO_VK_PUSH")))) { D.has_push = 1; D.exts[D.next++] = "VK_KHR_push_descriptor"; }
+    if (has_name(dext, ndext, "VK_KHR_calibrated_timestamps")) { D.cal = 1; D.exts[D.next++] = "VK_KHR_calibrated_timestamps"; }
+    else if (has_name(dext, ndext, "VK_EXT_calibrated_timestamps")) { D.cal = 2; D.exts[D.next++] = "VK_EXT_calibrated_timestamps"; }
     vkGetPhysicalDeviceFeatures2(V.gpu, &D.f2);                    /* every supported feature of these structures is enabled */
     if (vkGetPhysicalDeviceProperties2) {                          /* which driver (Vulkan 1.2): the pipeline cache choice */
         VkPhysicalDeviceDriverProperties dp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
@@ -322,8 +326,10 @@ static void occ_end(void) { if (g_occ_open) { vkCmdEndQuery(R.cmd, g_occ_pool, (
  * frame's passes are split by this file rather than by the game's own target changes */
 static struct { int line; long long n; } g_pe[16]; static int g_pe_n;
 static long long g_retarget_same;             /* target sets equal to the current targets: the pass went on */
+static void pass_vp_note(void);
 static void pass_end_r(int line) {
     if (!R.in_pass) return;
+    pass_vp_note();
     occ_end(); vkCmdEndRendering(R.cmd); R.in_pass = 0; pass_shot();
     int i; for (i = 0; i < g_pe_n && g_pe[i].line != line; i++) {}
     if (i == g_pe_n && g_pe_n < 16) { g_pe[g_pe_n].line = line; g_pe[g_pe_n++].n = 0; }
@@ -352,10 +358,20 @@ static LONG64 g_ts_n;
 #define FRSTAT_N 40000
 static float g_fr_gpu[FRSTAT_N], g_fr_wall[FRSTAT_N];
 static uint8_t g_fr_play[FRSTAT_N];
+static uint16_t g_fr_vpw[FRSTAT_N], g_fr_vph[FRSTAT_N];      /* SMO_FRAMECSV: the viewport of the frame's main 3D pass (the pass with a depth target and the most draws): the game's dynamic resolution */
+static uint32_t g_fr_vpdraws[FRSTAT_N];
+static uint16_t g_pass_vpw, g_pass_vph; static LONG64 g_pass_draws0; static int g_pass_depth;      /* the pass being recorded: its largest viewport, draws so far at its start, depth target */
 static LONG64 g_cur_frame, g_play_frames, g_scene_frames, g_frames_counted;      /* frames: play frames, frames with compute dispatches, all ("nvn_vk_frames:") */
+static void pass_vp_note(void) {                   /* at a pass's end: the frame's main 3D pass so far (a depth target, the most draws) */
+    LONG64 nd = R.frame_draws - g_pass_draws0;
+    if (!g_pass_depth || g_cur_frame < 0 || g_cur_frame >= FRSTAT_N || nd <= (LONG64)g_fr_vpdraws[g_cur_frame]) return;
+    g_fr_vpdraws[g_cur_frame] = (uint32_t)nd;
+    g_fr_vpw[g_cur_frame] = g_pass_vpw ? g_pass_vpw : (uint16_t)R.pass_w; g_fr_vph[g_cur_frame] = g_pass_vph ? g_pass_vph : (uint16_t)R.pass_h;
+}
 void nvn_tl(int ev, int arg);                     /* nvn_gl.c: SMO_FRAMETL (13/14: a wait for the GPU begins / ends) */
 static void rep_land(void);
 static int fence_done(Slot *s) { rec_reach(s->rec_end); return vkGetFenceStatus(V.device, s->fence) == VK_SUCCESS; }
+static LONG64 g_reuse_n, g_reuse_tk, g_waitall_n, g_waitall_tk;      /* nvn_vk_syncwait: the render thread's own waits by cause */
 static void slot_wait(Slot *s) {
     if (!s->pending) return;
     LONG64 t0 = tk();
@@ -386,7 +402,7 @@ static void cmd_begin(void) {
     g_tset_gen++; g_tset_used = 0; g_tset_list_used = 0;
     R.cur = (R.cur + 1) % NSLOT;
     Slot *s = &R.slot[R.cur];
-    slot_wait(s);
+    { LONG64 t0 = tk(); int busy = s->pending; slot_wait(s); if (busy) { g_reuse_n++; g_reuse_tk += tk() - t0; } }
     for (int i = 0; i < s->npool; i++) VKC(vkResetDescriptorPool(V.device, s->pool[i], 0));
     s->ipool = 0;
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -422,7 +438,7 @@ static uint64_t cmd_submit(VkSemaphore wait, VkSemaphore signal) {
     R.recording = 0; R.cmd = NULL; R.flushes++;
     return R.serial;
 }
-static void cmd_wait_all(void) { cmd_submit(NULL, NULL); for (int i = 0; i < NSLOT; i++) slot_wait(&R.slot[i]); R.done = R.serial; }
+static void cmd_wait_all(void) { LONG64 t0 = tk(); cmd_submit(NULL, NULL); for (int i = 0; i < NSLOT; i++) slot_wait(&R.slot[i]); R.done = R.serial; g_waitall_n++; g_waitall_tk += tk() - t0; }
 
 /* ---------------------------------------------------------------- stream ring */
 #define RING_ALIGN 256
@@ -772,6 +788,7 @@ struct VTex {
     int w, h, d, levels, layers, samples, expand, decode, is3d, feedback, bpb, bw, bh;
     int rs; float sx, sy;                          /* rs = 1 when the image is smaller than the game's texture (w, h are the image's; sx, sy = image / game) */
     int storage;                                   /* made with VK_IMAGE_USAGE_STORAGE_BIT (NVN_TEXTURE_FLAGS_IMAGE): it can be bound as an image */
+    int cleared;                                   /* cleared to zero when it was made (every texel defined) */
     int nvf; VkFormat vf[2];                       /* format list (fl_on): the only formats its views may have; 0: any */
     VView *views; VTex *next, *prev;
 };
@@ -1217,6 +1234,18 @@ static void vt_put(Tex *t, int level, int layer, int w, int h, int d, const void
 static LONG64 g_ta_n, g_ta_bytes, g_ta_tk, g_ta_max_tk, g_late_n, g_late_tk, g_late_scene_n, g_late_scene_tk, g_up_fr_tk, g_up_fr_bytes;
 static int g_up_fr_n, g_ta_inside;
 static volatile LONG g_in_scene;                   /* nvn_vk_pipelines.c (included further down) */
+static LONG64 g_zs_skips, g_zs_bytes, g_zs_checked;
+static int zero_skip_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("SMO_VK_ZERO_SKIP"); on = !(e && e[0] && !atoi(e)); } return on; }
+static int mem_is_zero(const uint8_t *p, size_t n) {       /* 64 bytes at a time, out at the first non-zero byte */
+    g_zs_checked++;
+    size_t k = 0;
+    for (; k + 64 <= n; k += 64) {
+        uint64_t a[8]; memcpy(a, p + k, 64);
+        if (a[0] | a[1] | a[2] | a[3] | a[4] | a[5] | a[6] | a[7]) return 0;
+    }
+    for (; k < n; k++) if (p[k]) return 0;
+    return 1;
+}
 static VTex *vt_get2(Tex *t, int sync) {
     VTex *vt = t->vk;
     LONG64 tu0 = 0, ub0 = R.upload_bytes;
@@ -1305,6 +1334,7 @@ static VTex *vt_get2(Tex *t, int sync) {
             VkImageSubresourceRange sr = {vt->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
             vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             if (vt->samples == 1) {
+                vt->cleared = 1;
                 if (can_color) { VkClearColorValue z; memset(&z, 0, sizeof z); vkCmdClearColorImage(R.cmd, vt->img, LAYOUT(vt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL), &z, 1, &sr); }
                 else { VkClearDepthStencilValue z = {0.0f, 0}; vkCmdClearDepthStencilImage(R.cmd, vt->img, LAYOUT(vt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL), &z, 1, &sr); }
                 /* the first upload usually follows in the same layout, where vt_layout adds no barrier: without this the
@@ -1316,6 +1346,12 @@ static VTex *vt_get2(Tex *t, int sync) {
         }
     }
     vt_check(vt);
+    /* A new image starts cleared to zero (above). Where the texture's memory holds only zeros too, reading it out (hash,
+     * de-swizzle, ring copy: 5.6 MB for a 1600x900 buffer) changes nothing: one pass over the memory instead. Only in
+     * CPU_NO_ACCESS pools, where the texture is not hashed again after its first look, so skipping that look leaves it as
+     * if it had been read (SMO: agl's screen buffers, made again every frame). SMO_VK_ZERO_SKIP=0: read it out as before. */
+    if (tu0 && vt->cleared && sync && !t->gpu_written && !t->uploaded && (t->pool_flags & 1) && t->mem && !t->b.packaged && zero_skip_on() &&
+        (!t->limit || t->mem + t->data_size <= t->limit) && mem_is_zero(t->mem, t->data_size)) { t->uploaded = 1; g_zs_skips++; g_zs_bytes += (LONG64)t->data_size; }
     if (sync && nvn_front_tex_changed(t)) {
         if (!tu0) tu0 = tk();
         g_put_vt = vt;
@@ -1633,6 +1669,7 @@ static int pass_begin(void) {
     vkCmdBeginRendering(R.cmd, &ri);
     g_fr_passes++;
     R.in_pass = 1; R.pass_w = w; R.pass_h = h;
+    g_pass_vpw = g_pass_vph = 0; g_pass_draws0 = R.frame_draws; g_pass_depth = R.depth.tex != NULL;
     return 1;
 }
 
@@ -1864,6 +1901,7 @@ static void set_dynamic_state(void) {
     vp.x = x; vp.y = y + h; vp.width = w; vp.height = -h; vp.minDepth = R.drange[0]; vp.maxDepth = R.drange[1];      /* NVN upper-left origin: clip y = +1 is row y (design, section 3) */
     if (vp.minDepth < 0) vp.minDepth = 0; if (vp.maxDepth > 1) vp.maxDepth = 1;
     DYNSET(vp, vp, vkCmdSetViewport(R.cmd, 0, 1, &vp));
+    if (R.have_viewport && R.viewport[2] * R.viewport[3] > (float)g_pass_vpw * (float)g_pass_vph) { g_pass_vpw = (uint16_t)R.viewport[2]; g_pass_vph = (uint16_t)R.viewport[3]; }
     int sx = R.have_scissor ? R.scissor[0] : 0, sy = R.have_scissor ? R.scissor[1] : 0, sw = R.have_scissor ? R.scissor[2] : R.pass_w, sh = R.have_scissor ? R.scissor[3] : R.pass_h;
     if (R.pass_rs && R.have_scissor) rs_rect(&sx, &sy, &sw, &sh);
     if (sx < 0) { sw += sx; sx = 0; } if (sy < 0) { sh += sy; sy = 0; }
@@ -1998,26 +2036,100 @@ static void cb_land(int midbatch) {                /* the GPU has finished every
     g_tm[1] += tk() - t0;
     rep_land();
 }
-/* A timestamp report (counter type 0, "bottom of pipe": after the work before it) is written when
+/* SMO_VK_REPORT_DEFER=1: a timestamp report (counter type 0, "bottom of pipe": after the work before it) is written when
  * its submission has finished and the compute results recorded before it are in guest memory, instead of submitting and
- * waiting for the GPU right there (cb_sync). The game reads a report after its fence, and the fence wait lands what is
- * due (vk_sync_wait_). Reports land in the order they were recorded; with the queue full, the old way. */
-static struct { uint64_t addr, serial; uint32_t epoch; int need_cb; } g_rep[512];
+ * waiting for the GPU right there (cb_sync: about 11 ms each, 2,783 times in a Cap Kingdom run). The game reads a report
+ * after its fence, and the fence wait lands what is due (vk_sync_wait_). Reports land in the order they were recorded. */
+static struct { uint64_t addr, serial; uint32_t epoch; int need_cb, q; } g_rep[512];      /* q: its GPU time is in g_rep_pool's query of the same index */
+/* The time a deferred report gets: the GPU's own clock where the report stands in the commands (a timestamp query,
+ * bottom of pipe: when the work before it has finished), in the time base of QueryPerformanceCounter, which
+ * nvnDeviceGetCurrentTimestampInNanoseconds also uses. The game drives its dynamic resolution from these times: a report
+ * written only when its submission is seen finished (later than the work ended) made it lower the resolution.
+ * Without calibrated timestamps or host query reset: the time of writing, as before. */
+static VkQueryPool g_rep_pool;
+static int g_rep_gpu = -1;
+static double g_cal_off_ns; static uint64_t g_cal_at;
+static int rep_gpu_on(void) {
+    if (g_rep_gpu >= 0) return g_rep_gpu;
+    g_rep_gpu = 0;
+    if (!vkGetCalibratedTimestamps || !D.f12.hostQueryReset || !V.props.limits.timestampComputeAndGraphics || (getenv("SMO_VK_REPORT_GPUTIME") && !atoi(getenv("SMO_VK_REPORT_GPUTIME")))) return 0;
+    VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = 512;
+    if (vkCreateQueryPool(V.device, &qi, NULL, &g_rep_pool) != VK_SUCCESS) return 0;
+    vkResetQueryPool(V.device, g_rep_pool, 0, 512);
+    return g_rep_gpu = 1;
+}
+static void rep_calibrate(void) {                  /* GPU clock -> QueryPerformanceCounter nanoseconds; again every half second (the clocks drift) */
+    uint64_t now = vk_now_ns();
+    if (g_cal_at && now - g_cal_at < 500000000ull) return;
+    VkCalibratedTimestampInfoKHR ci[2] = {{VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR}, {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR}};
+    ci[0].timeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
+#ifdef _WIN32
+    ci[1].timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+#else
+    ci[1].timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR;  /* the shim's QueryPerformanceCounter (win32_posix.c, CLOCK_UPTIME_RAW) */
+#endif
+    uint64_t ts[2], dev;
+    if (vkGetCalibratedTimestamps(V.device, 2, ci, ts, &dev) != VK_SUCCESS) { g_rep_gpu = 0; return; }
+#ifdef _WIN32
+    LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+    double host = (double)ts[1] * 1e9 / (double)f.QuadPart;
+#else
+    double host = (double)ts[1];
+#endif
+    g_cal_off_ns = host - (double)ts[0] * (double)V.props.limits.timestampPeriod;
+    g_cal_at = now;
+}
+static uint64_t g_q_wait[512];
+static LONG64 g_rep_lag_n; static double g_rep_lag_sum, g_rep_lag_min = 1e9, g_rep_lag_max = -1e9;      /* GPU report times against the clock when written (nvn_vk_syncwait:) */                   /* a query read before the GPU wrote it: reset only once that submission has finished */
+static uint64_t rep_time(int i) {                  /* the report's time: its query when the GPU has written it, else now */
+    uint64_t t = 0;
+    if (g_rep[i].q) {
+        g_rep[i].q = 0;
+        if (vkGetQueryPoolResults(V.device, g_rep_pool, (uint32_t)i, 1, sizeof t, &t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            vkResetQueryPool(V.device, g_rep_pool, (uint32_t)i, 1);
+            rep_calibrate();
+            if (g_rep_gpu) {
+                uint64_t v = (uint64_t)(g_cal_off_ns + (double)t * (double)V.props.limits.timestampPeriod);
+                double lag = (double)((int64_t)(vk_now_ns() - v)) / 1e6;      /* how long before now the work ended: must be >= 0 */
+                g_rep_lag_n++; g_rep_lag_sum += lag; if (lag < g_rep_lag_min) g_rep_lag_min = lag; if (lag > g_rep_lag_max) g_rep_lag_max = lag;
+                return v;
+            }
+        } else g_q_wait[i] = g_rep[i].serial;
+    }
+    return vk_now_ns();
+}
 static int g_rep_head, g_rep_n;
-static int rep_defer_on(void) { static int on = -1; if (on < 0) on = getenv("SMO_VK_REPORT_DEFER") && atoi(getenv("SMO_VK_REPORT_DEFER")); return on; }
-static int rep_defer(uint64_t addr) {
-    if (!rep_defer_on() || g_rep_n == 512) return 0;
+static LONG64 g_rep_deferred;
+static int rep_mode(void) { static int m = -1; if (m < 0) m = getenv("SMO_VK_REPORT_DEFER") ? atoi(getenv("SMO_VK_REPORT_DEFER")) : 0; return m; }      /* 0 written at the replay without a wait (upstream), 1 deferred (experiment) */
+static int rep_defer_on(void) { return rep_mode() == 1; }
+/* top: a TIMESTAMP_TOP report (counter type 16), deferred only with GPU times: the game measures its GPU time from a
+ * type 16 report to a type 0 one, so both must come from the GPU's clock (a CPU time for the start counted the queue
+ * before the GPU too, and the game lowered its resolution to 800x450). */
+static int rep_defer(uint64_t addr, int top) {
+    if (!rep_defer_on() || g_rep_n == 512 || (top && !rep_gpu_on())) return 0;
     int i = (g_rep_head + g_rep_n++) % 512;
     g_rep[i].addr = addr; g_rep[i].serial = R.serial + 1;          /* the submission the commands recorded now go into */
-    g_rep[i].need_cb = g_cb_live || g_cb_pending; g_rep[i].epoch = g_cb_epoch;
+    g_rep[i].need_cb = !top && (g_cb_live || g_cb_pending); g_rep[i].epoch = g_cb_epoch; g_rep[i].q = 0;
+    if (g_q_wait[i] && R.done >= g_q_wait[i]) { vkResetQueryPool(V.device, g_rep_pool, (uint32_t)i, 1); g_q_wait[i] = 0; }
+    if (rep_gpu_on() && !g_q_wait[i]) { cmd_begin(); vkCmdWriteTimestamp(R.cmd, top ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_rep_pool, (uint32_t)i); g_rep[i].q = 1; }
+    g_rep_deferred++;
     return 1;
+}
+static void rep_flush_to(uint64_t serial) {     /* a fence answered before its work ran (SMO_VK_FENCE_LATE): the game reads the reports recorded before it now, so they get the time now */
+    while (g_rep_n && g_rep[g_rep_head].serial <= serial) {
+        int i = g_rep_head;
+        uint64_t d[2] = {0, rep_time(i)};
+        hm_guard(g_rep[i].addr, 16); memcpy(P(g_rep[i].addr), d, 16); host_wrote(g_rep[i].addr, 16, GEN_REPORT);
+        g_rep_head = (g_rep_head + 1) % 512; g_rep_n--;
+    }
 }
 static void rep_land(void) {
     while (g_rep_n) {
         int i = g_rep_head;
         if (R.done < g_rep[i].serial || (g_rep[i].need_cb && g_cb_epoch == g_rep[i].epoch)) return;      /* its work, or the copy-back of what that work wrote, is not done */
-        uint64_t d[2] = {0, vk_now_ns()};
-        memcpy(P(g_rep[i].addr), d, 16); host_wrote(g_rep[i].addr, 16, GEN_REPORT);
+        uint64_t d[2] = {0, rep_time(i)};
+        hm_guard(g_rep[i].addr, 16); memcpy(P(g_rep[i].addr), d, 16); host_wrote(g_rep[i].addr, 16, GEN_REPORT);
         g_rep_head = (g_rep_head + 1) % 512; g_rep_n--;
     }
 }
@@ -2234,6 +2346,25 @@ static void cb_batch_end(void) {
  * state 1 sets g_cb_live to 0). Every range a draw reads is looked up here while compute results are live, about 10,000
  * a frame: walking the 256 slots for the dozen CBs of a frame cost 0.5-0.7 ms a frame once they stayed live longer. */
 static int16_t g_cb_live_list[CB_MAX];
+/* SMO_VK_CB_CARRY=1 (experiment): at the start of a batch, the compute buffers of the batch before whose submission has
+ * not finished stay bound for this one (state 1 again: buf_ref binds them, a range that only partly lies in one still
+ * syncs) instead of the render thread waiting for the GPU to copy them back (cb_sync). A barrier makes what compute and
+ * copies wrote before visible to this batch's reads. They are copied back when this batch's submission has finished. */
+static LONG64 g_cb_carried;
+static int cb_carry_on(void) { static int on = -1; if (on < 0) on = getenv("SMO_VK_CB_CARRY") && atoi(getenv("SMO_VK_CB_CARRY")); return on; }
+static void cb_carry(void) {
+    cb_poll();                                     /* finished already: copied back as before */
+    if (!g_cb_pending) return;
+    int n = 0;
+    for (int i = 0; i < g_cb_used; i++) if (g_cb[i].state == 2) { g_cb[i].state = 1; g_cb_live_list[n++] = (int16_t)i; }
+    g_cb_live = n; g_cb_pending = 0; g_cb_carried++;
+    cmd_begin();
+    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                       VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
 static CB *cb_inside(uint64_t addr, uint64_t size) {
     for (int k = 0; k < g_cb_live; k++) { CB *c = &g_cb[g_cb_live_list[k]]; if (c->state == 1 && addr >= c->addr && addr + size <= c->addr + c->size) return c; }
     return NULL;
@@ -2286,6 +2417,18 @@ static CB *cb_new(uint64_t addr, uint64_t size) {
     return c;
 }
 typedef struct { uint64_t off, size; int zero; VkBuffer buf; } BufRef;
+/* SMO_VK_UBO_TRIM=1 (experiment): a uniform buffer is copied and bound only as far as the stage reads it at constant
+ * indices (mx_translate's cb_words), not whole (the game binds 4-64 KB blocks; Metro streamed 21.8 MB a frame). A buffer
+ * the stage also reads at a run-time index (LDC, compute's global-memory reads, bindless handles) stays whole. */
+static LONG64 g_ubo_full, g_ubo_sent;
+static uint64_t ubo_size(const VStage *v, unsigned n, uint64_t size) {
+    static int on = -1;
+    if (on < 0) on = getenv("SMO_VK_UBO_TRIM") && atoi(getenv("SMO_VK_UBO_TRIM"));
+    uint64_t want = size;
+    if (on && !(v->cb_dyn >> n & 1) && v->cb_words[n]) { uint64_t need = ((uint64_t)v->cb_words[n] * 4 + 15) & ~(uint64_t)15; if (need < size) want = need; }
+    g_ubo_full += (LONG64)size; g_ubo_sent += (LONG64)want;
+    return want;
+}
 /* Where a command reads the guest range from: a CB of this batch that contains it, else the stream ring. align: the offset
  * alignment the use needs (storage descriptors), 1 = none. Returns 1 when a CB is bound. */
 static int buf_ref(uint64_t addr, uint64_t size, uint64_t align, BufRef *b) {
@@ -2449,7 +2592,7 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
             b->zero = 0; b->buf = R.ring;
             if (n == 2) { b->off = c2_ring(5); b->size = sizeof R.c2[5]; }
             else if (n == 1 && st->ctl[3] && st->ctl[4]) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)(st->code + st->ctl[4]), b->size); }
-            else if (n >= 3 && R.ubo[5][n - 3].addr && R.ubo[5][n - 3].size) buf_ref(R.ubo[5][n - 3].addr, R.ubo[5][n - 3].size, al, b);
+            else if (n >= 3 && R.ubo[5][n - 3].addr && R.ubo[5][n - 3].size) buf_ref(R.ubo[5][n - 3].addr, ubo_size(v, n, R.ubo[5][n - 3].size), al, b);
             else b->zero = 1;                      /* c0 outside the storage descriptors, or nothing bound: zeros (OpenGL: nothing bound) */
         }
         for (unsigned k = 0; k < 16; k++) {
@@ -2662,7 +2805,7 @@ static int draw_prepare(unsigned prim) {
             else if (n == 2) { b->off = c2_ring(s); b->size = sizeof R.c2[s]; }
             else if (n == 1 && st->ctl[3] && st->ctl[4]) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)(st->code - 0x30 + st->ctl[4]), b->size); }
             else if (n == 3 && s == 0 && R.ubo[0][0].addr && R.ubo[0][0].size && hud_fix(R.ubo[0][0].addr, R.ubo[0][0].size, b)) {}      /* a HUD layer at the window's shape */
-            else if (n >= 3 && R.ubo[s][n - 3].addr && R.ubo[s][n - 3].size) { g_rp_kind = 0; buf_ref(R.ubo[s][n - 3].addr, R.ubo[s][n - 3].size, sal, b); g_rp_kind = 4; }
+            else if (n >= 3 && R.ubo[s][n - 3].addr && R.ubo[s][n - 3].size) { g_rp_kind = 0; buf_ref(R.ubo[s][n - 3].addr, ubo_size(v, n, R.ubo[s][n - 3].size), sal, b); g_rp_kind = 4; }
             else b->zero = 1;
         }
         for (unsigned k = 0; k < 16; k++) {
@@ -3310,6 +3453,7 @@ static void exec(const Cmd *m, int depth) {
             break;
         }
         if (a[0] != 0 && a[0] != 16) { static char msg[80]; snprintf(msg, sizeof msg, "nvnCommandBufferReportCounter of counter type %u (a GPU query)", (unsigned)a[0]); nvn_vk_missing(msg); break; }
+        if (a[1] && (a[0] == 0 || a[0] == 16) && rep_defer(a[1], a[0] == 16)) break;
         if (a[1]) { uint64_t d[2] = {0, vk_now_ns()};      /* no wait for compute results: the time is the replay's, and waiting here cost 3 ms a frame next to New Donk City's cars (a GPU round trip at every frame) */ hm_guard(a[1], 16); memcpy(P(a[1]), d, 16); host_wrote(a[1], 16, GEN_REPORT); }
         break;
     case OP_CONSRASTER: if (a[0] & 1) nvn_vk_missing("conservative rasterisation (nvnCommandBufferSetConservativeRasterEnable)"); break;
@@ -3524,6 +3668,7 @@ static void vk_submit(void *arg) {
     if (!V.alive) return;                          /* after the shutdown at exit: the device is gone */
     prewarm_wait();
     LONG64 t0 = tk();
+    if (cb_carry_on()) cb_carry(); else
     CB_SYNC(0);                                     /* what the last batch's dispatches wrote is in guest memory before this batch reads it */
     if (g_occ_qn) occ_resolve(0);                  /* occlusion counts whose submissions have finished */
     LONG64 t1 = tk();
@@ -3553,16 +3698,38 @@ static void vk_fence(void *arg) { SyncJob *j = arg; if (j->o->dead || !V.alive) 
  * through waits that do not land them (the occlusion wait at the present, slot_wait in cmd_begin). The game reads what the
  * fence covers as soon as the wait returns, so what has finished is landed first (cb_poll never waits). */
 static LONG64 g_sync_pending_cb;
+/* the game's own waits on its fences (nvnSyncWait) that found the GPU still busy: how long they waited, and how far the
+ * fence was behind the newest submission (0: the game waits for everything it has submitted, so the GPU runs dry after) */
+static LONG64 g_sw_n, g_sw_tk, g_sw_lag[4], g_late_n;
 static void vk_sync_wait_(SyncJob *j) {
     uint64_t want = (uint64_t)(uintptr_t)j->o->s;
     if (!want || !V.alive) { j->result = 3; return; }       /* never fenced */
     want--;
     if (want <= R.done) { if (g_cb_pending && g_cb_serial <= want) g_sync_pending_cb++; cb_poll(); j->result = 0; return; }
+    {   /* SMO_VK_FENCE_LATE=1 (experiment): the game waits for the fence of the frame it has just submitted, so its CPU and
+         * the GPU ran in series. Instead, wait for the fence deferred by the previous wait and defer this one: the GPU
+         * keeps at most two frames of work, the game's next frame overlaps the GPU's (LAS Recomp's overlap, 13398126d6).
+         * What the game reads after the fence that the GPU makes (compute results, reports, occlusion counts) is then
+         * one wait late: measured with tests/run_cap_kingdom.py. */
+        static int late = -1;
+        static uint64_t deferred;
+        if (late < 0) late = getenv("SMO_VK_FENCE_LATE") ? atoi(getenv("SMO_VK_FENCE_LATE")) : 0;
+        if (late && j->timeout && want > deferred) {
+            uint64_t prev = deferred;
+            deferred = want;
+            if (prev && late == 2 && g_cb_pending) prev = 0;      /* experiment: compute results of the frame must be in guest memory, so wait as before */
+            if (prev && late == 3) rep_flush_to(want);      /* experiment: the reports of the frame answered late get the time now */
+            if (prev) { g_late_n++; want = prev; if (want <= R.done) { j->result = 1; cb_poll(); rep_land(); return; } }
+        }
+    }
     for (int i = 0; i < NSLOT; i++) {
         Slot *s = &R.slot[i];
         if (!s->pending || s->serial != want) continue;
         rec_reach(s->rec_end);
+        LONG64 t0 = tk();
+        rec_reach(s->rec_end);
         VkResult r = vkWaitForFences(V.device, 1, &s->fence, VK_TRUE, j->timeout);
+        g_sw_n++; g_sw_tk += tk() - t0; g_sw_lag[R.serial - want < 3 ? R.serial - want : 3]++;
         if (r == VK_SUCCESS) { if (s->serial > R.done) R.done = s->serial; j->result = 1; cb_poll(); rep_land(); } else j->result = r == VK_TIMEOUT ? 2 : 3;
         return;
     }
@@ -4085,7 +4252,16 @@ swap: ;
     VkSemaphore acq = g_sem[g_isem][0], rend = g_sem[g_isem][1];
     if (V.swapchain) {      /* the window changed size (F11, display.c): a driver need not say so with OUT_OF_DATE / SUBOPTIMAL */
         RECT rc;
-        if (GetClientRect(V.hwnd, &rc) && rc.right > 0 && rc.bottom > 0 && ((uint32_t)rc.right != V.extent.width || (uint32_t)rc.bottom != V.extent.height)) {
+#ifdef _WIN32
+        BOOL got = GetClientRect(V.hwnd, &rc);
+#else
+        /* the window's size in pixels from SDL: GetClientRect has no POSIX version (win32_posix.h answers FALSE), so a
+         * window gone full screen kept its 1280x720 swapchain and the compositor stretched it over the screen */
+        void display_pixel_size(int *w, int *h);
+        int pw, ph; display_pixel_size(&pw, &ph); rc.left = rc.top = 0; rc.right = pw; rc.bottom = ph;
+        BOOL got = TRUE;
+#endif
+        if (got && rc.right > 0 && rc.bottom > 0 && ((uint32_t)rc.right != V.extent.width || (uint32_t)rc.bottom != V.extent.height)) {
             cmd_wait_all(); swapchain_destroy(); InterlockedIncrement64(&g_vk_recreated);
         }
     }
@@ -4223,6 +4399,7 @@ swap: ;
             LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
             if (!t_first) t_first = t_now;
             if (!play && R.frame_draws <= 60 && frame > 600) { if (!t_load) t_load = t_now; } else if (!play && R.frame_draws > 60) t_load = 0;      /* t_load: the start of the run of loading-screen frames before the first play frame */
+            if (play && !said) { void display_play_reached(void); display_play_reached(); }
             if (play && !said) { said = 1; printf("nvn_vk: first play frame is frame %lld, %.1f s after the first present; the loading screen before it lasted %.1f s\n", (long long)frame, (double)(t_now - t_first) / (double)fq.QuadPart, t_load ? (double)(t_now - t_load) / (double)fq.QuadPart : 0.0); }
         }
         if (frame >= 0 && frame < FRSTAT_N) {
@@ -4353,6 +4530,7 @@ static void vkd_init(void) {
     VKD(X)
 #undef X
     vkCmdSetVertexInputEXT = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(V.device, "vkCmdSetVertexInputEXT");
+    if (D.cal) vkGetCalibratedTimestamps = (PFN_vkGetCalibratedTimestampsKHR)vkGetDeviceProcAddr(V.device, D.cal == 1 ? "vkGetCalibratedTimestampsKHR" : "vkGetCalibratedTimestampsEXT");
     if (D.has_push) { vkCmdPushDescriptorSetKHR = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(V.device, "vkCmdPushDescriptorSetKHR"); if (!vkCmdPushDescriptorSetKHR) D.has_push = 0; }
     if (D.has_eds3) {
 #define X3(n) n = (PFN_##n)vkGetDeviceProcAddr(V.device, #n); if (!n) vkd_fail("the device has VK_EXT_extended_dynamic_state3 but no " #n);
@@ -4408,6 +4586,19 @@ static void vkd_init(void) {
 static int frstat_cmp(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return x < y ? -1 : x > y; }
 /* play frames only (dispatches and more than 120 draws); the first 30 are left out (their buffers were recorded
  * while the stage was still being set up). GPU ms = sum of the spans of the frame's command buffers (SMO_VK_GPUTIME=1). */
+/* SMO_FRAMECSV=<file> (measurement): one line a frame: frame, play frame, ms between presents, GPU ms (SMO_VK_GPUTIME=1),
+ * largest viewport into a 1280+ wide target (the dynamic resolution). For benchmarks and A/B comparisons. */
+static void frstat_csv(void) {
+    const char *path = getenv("SMO_FRAMECSV");
+    if (!path || !*path) return;
+    FILE *f = fopen(path, "w");
+    if (!f) { printf("nvn_vk: SMO_FRAMECSV: cannot write %s\n", path); return; }
+    fprintf(f, "frame,play,wall_ms,gpu_ms,vp_w,vp_h\n");
+    for (long long i = 0; i < g_cur_frame && i < FRSTAT_N; i++)
+        fprintf(f, "%lld,%d,%.3f,%.3f,%u,%u\n", i, g_fr_play[i], (double)g_fr_wall[i], (double)g_fr_gpu[i], g_fr_vpw[i], g_fr_vph[i]);
+    fclose(f);
+    printf("nvn_vk: SMO_FRAMECSV: %lld frames written to %s\n", (long long)(g_cur_frame < FRSTAT_N ? g_cur_frame : FRSTAT_N), path);
+}
 static void frstat_report(void) {
     static float g[FRSTAT_N], w[FRSTAT_N];
     int n = 0, seen = 0, slow = 0;
@@ -4431,11 +4622,20 @@ static void vkd_shutdown(void) {
     if (!R.ring) return;
     {   LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
         double k = 1000.0 / (double)fq.QuadPart;
+        printf("nvn_vk_syncwait: the game's fence waits that found the GPU busy: %lld, %.0f ms in all; submissions after the fence waited for: 0: %lld, 1: %lld, 2: %lld, 3 or more: %lld\n",
+               (long long)g_sw_n, (double)g_sw_tk * k, (long long)g_sw_lag[0], (long long)g_sw_lag[1], (long long)g_sw_lag[2], (long long)g_sw_lag[3]);
+        printf("nvn_vk_syncwait: batches that kept the last batch's compute buffers bound instead of waiting (SMO_VK_CB_CARRY=1): %lld\n", (long long)g_cb_carried);
+        printf("nvn_vk_syncwait: game fence waits answered with the previous wait's fence (SMO_VK_FENCE_LATE=1): %lld\n", (long long)g_late_n);
+        printf("nvn_vk_ubo: uniform buffer bytes bound %lld of %lld (SMO_VK_UBO_TRIM=1 binds only what the stages read)\n", (long long)g_ubo_sent, (long long)g_ubo_full);
+        if (g_rep_lag_n) printf("nvn_vk_syncwait: report GPU times %lld, written this long after the work ended: mean %.2f ms, min %.2f, max %.2f (negative: the calibration is off)\n", (long long)g_rep_lag_n, g_rep_lag_sum / (double)g_rep_lag_n, g_rep_lag_min, g_rep_lag_max);
+        printf("nvn_vk_syncwait: timestamp reports deferred to the end of their submission (SMO_VK_REPORT_DEFER=1): %lld\n", (long long)g_rep_deferred);
+        printf("nvn_vk_syncwait: the render thread's own waits: a command buffer slot still busy %lld times, %.0f ms; wait for everything %lld times, %.0f ms; compute copy-back syncs %lld, %.0f ms\n",
+               (long long)g_reuse_n, (double)g_reuse_tk * k, (long long)g_waitall_n, (double)g_waitall_tk * k, (long long)R.cb_waits, (double)R.cb_wait_ticks * k);
         printf("nvn_vk_fl: format lists %s: %lld render targets with one (%lld of them not mutable: no sRGB / UNORM twin), %lld views given the image's own format\n", fl_on() ? "on" : "off (SMO_VK_FORMAT_LIST=1 turns them on)", (long long)g_fl_images, (long long)g_fl_fixed, (long long)g_fl_refused);
         printf("nvn_vk_tex: textures made ahead of their first use: %lld (%.0f MB, %.0f ms in all, at most %.1f ms after one present); made or read at their use: %lld times, %.0f ms (of them in scene frames: %lld, %.0f ms)\n",
                (long long)g_ta_n, (double)g_ta_bytes / 1048576.0, (double)g_ta_tk * k, (double)g_ta_max_tk * k, (long long)g_late_n, (double)g_late_tk * k, (long long)g_late_scene_n, (double)g_late_scene_tk * k);
     }
-    frstat_report();
+    frstat_report(); frstat_csv();
     if (RS_ON && rs_ui_native()) printf("nvn_vk_scale: SMO_VK_UI_NATIVE=1: the window's textures are kept at the game's size; passes with such a colour target and a SCALED depth target (drawn without depth): %lld\n", (long long)g_rs_mixed);
     if (RS_ON) printf("nvn_vk_scale: resolution scale %.3f: %lld images made scaled, %lld fragment stages translated in this run for it (%lld of them read the pixel position, %lld fetch texels by integer position), %lld uploads into and %lld read-backs from a scaled image, %lld copies / blits touching one\n",
                       (double)rs_scale(), (long long)g_rs_images, (long long)g_rs_stages, (long long)g_rs_fcs, (long long)g_rs_tf, (long long)g_rs_up, (long long)g_rs_down, (long long)g_rs_blits);
@@ -4472,6 +4672,7 @@ static void vkd_shutdown(void) {
            (long long)g_vtx_over, g_vtxgrow > 0 ? " (copied as far as they read)" : g_vtxgrow == 0 ? " (SMO_VK_VTXGROW=0: left as bound)" : "", (long long)g_vtx_capped, (long long)g_imax_scans);
     printf("nvn_vk: texture barriers (nvnCommandBufferBarrier, order fragments): %lld, %lld of them inside a pass that samples its own target (the pass ended there), %lld inside other passes (nothing to do)\n", (long long)g_texbar, (long long)g_texbar_split, (long long)g_texbar_skip);
     printf("nvn_vk: stream ring: %lld wraps, %lld waits for a submission still reading the part about to be written%s; %llu MB, largest range %llu KB\n", (long long)R.ring_wraps, (long long)g_ring_waits, g_ring_drain > 0 ? " (SMO_VK_RING_DRAIN=1: every wrap waited for the GPU)" : "", (unsigned long long)(R.ring_size >> 20), (unsigned long long)(g_ring_max_n >> 10));
+    printf("nvn_vk: new textures of CPU_NO_ACCESS pools whose memory was all zero, not read out (SMO_VK_ZERO_SKIP): %lld of %lld looked at (%lld MB)\n", (long long)g_zs_skips, (long long)g_zs_checked, (long long)(g_zs_bytes >> 20));
     printf("nvn_vk: images: %lld textures made with storage use (NVN_TEXTURE_FLAGS_IMAGE), %lld storage views, %lld dispatches that wrote images; draws with a geometry stage: %lld (%lld pipelines); indirect: %lld draws, %lld dispatches\n", (long long)g_storage_tex, (long long)g_img_views, (long long)g_img_disp, (long long)g_gs_draws, (long long)g_gs_pipes, (long long)g_indirect_draws, (long long)g_indirect_disp);
     printf("nvn_vk: textures nothing names (agl gave up their pool slots; SMO_VK_TEXFREE=%d frames unused): %lld images freed (%lld MB), %d waiting at the end, %lld used again after their image went (made again), %lld first used after\n",
            texfree_frames(), (long long)g_rc_freed, (long long)g_rc_freed_mb, g_rc_n, (long long)g_rc_again, (long long)g_rc_late);

@@ -334,7 +334,9 @@ int guest_thread_info(int i, Ctx **c, const char **name, HANDLE *h) {
     return 1;
 }
 /* Name of the guest thread running on host thread `tid`, or NULL (nvn_gl.c: CPU time per thread). */
+DWORD g_guest_main_tid;                     /* set by boot.c's guest_main: the thread nnMain runs on */
 const char *guest_thread_name_of(DWORD tid) {
+    if (tid && tid == g_guest_main_tid) return "nnMain";      /* the game's main thread: started by boot.c, not by CreateThread of the game */
     for (int i = 0; i < g_threads_n && i < 256; i++) {
         Obj *o = g_threads[i].o;
         if (o && o->thread && GetThreadId(o->thread) == tid) return o->name ? (const char *)(uintptr_t)o->name : "?";

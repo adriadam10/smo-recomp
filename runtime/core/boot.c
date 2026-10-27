@@ -210,8 +210,10 @@ void main_stack_report(void) {
            lo.State == MEM_RESERVE ? "no access" : "ACCESSIBLE", hi.State == MEM_RESERVE ? "no access" : "ACCESSIBLE");
 }
 
+extern DWORD g_guest_main_tid;              /* os_threads.c: the thread nnMain runs on, named in reports */
 static DWORD WINAPI guest_main(LPVOID arg) {
     (void)arg;
+    g_guest_main_tid = GetCurrentThreadId();
     static Ctx c;
     /* the main thread's stack has the size the program's own meta data asks for (main.npdm, META header +0x1c:
      * 0x100000 for this game; read from the file next to the ELF), with no-access pages below and above it, so that an
@@ -278,6 +280,7 @@ static DWORD wait_game(HANDLE t, DWORD ms) {
 int main(int argc, char **argv) {
     g_elf = argc > 1 ? argv[1] : GAME_ELF_DEFAULT;   /* the target's main.elf from the exe's folder (image.h) */
     setvbuf(stdout, NULL, _IONBF, 0);
+    { void hugetext_init(void); hugetext_init(); }   /* hugetext.c: SMO_HUGE_TEXT=1, before any game code runs */
     {   /* pad tools and their self-test (nnpad_sdl.c): no game is started */
         int nnhid_pad_selftest(void), nnpad_tool(int, char **);
         int tool;

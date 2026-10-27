@@ -40,7 +40,7 @@ VKH = T.vulkan_headers()
 # nvn_vk_pipelines.c, nvn_vk_vlayout.c, nvn_vk_watchdog.c and nvn_vk_rec.c (included by nvn_vk.c), game_shim.c (part of the game DLL) and
 # vk_shaderc_shim.c (smo_glslang.dll).
 HOST_SOURCES = {
-    'core': ['hostrt.c', 'boot.c', 'gamedll.c', 'sdklift_rt.c', 'hitch.c'],
+    'core': ['hostrt.c', 'boot.c', 'gamedll.c', 'sdklift_rt.c', 'hitch.c', 'hugetext.c'],
     'libc': ['clib.c', 'nnlibc2.c', 'libcxx.c', 'nncxxlib.c', 'nncxxrt.c', 'nniostream.c', 'nnunwind.c'],
     'os': ['os_threads.c', 'nnsdk.c', 'nntime.c', 'nnmisc.c', 'smo_nn.c'],
     'fs': ['nnfs.c', 'nnfsdir.c'],

@@ -242,10 +242,10 @@ def lift_function(env, entry):
             bad.append((pc, w, str(e)))
         last_noreturn = env.noreturn_stmt
         lines.append((pc, stmt))
-    out = ['static void f_%x(Ctx *c) {' % entry, '  c->fn = 0x%xULL;' % entry]
+    head = ['static void f_%x(Ctx *c) {' % entry, '  c->fn = 0x%xULL;' % entry]
     if fn.has_br:
-        out.append('  uint64_t jt = 0;')
-    out += ['L_%x: %s' % (pc, s) for pc, s in lines]
+        head.append('  uint64_t jt = 0;')
+    out = ['L_%x: %s' % (pc, s) for pc, s in lines]
     lastw = R.word(end - 4)
     falls = not lines[-1][1].startswith(TAILS) and not last_noreturn
     if (lastw & 0xfc000000) == 0x14000000 or lastw == 0xd65f03c0 or (lastw & 0xfffffc1f) == 0xd61f0000:
@@ -261,7 +261,10 @@ def lift_function(env, entry):
         out.append('L_dispatch: switch (jt) {')
         out += ['  case 0x%xULL: goto L_%x;' % (pc, pc) for pc, _ in lines]
         out.append('  default: call_indirect(c, jt); return; }')
-    out.append('}')
+    if R.reglocal.ENABLED:                           # registers and flags in locals, as the main lift (reglocal.py)
+        prologue, out = R.reglocal.localize(out)
+        head += prologue
+    out = head + out + ['}']
     for t in scan_code_refs(entry, end, env.starts_set):
         env.wanted.setdefault(t, None)
     return '\n'.join(out), len(lines), bad, any('guest_svc' in s for _, s in lines)

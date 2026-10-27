@@ -81,7 +81,14 @@ static int vsync_signal_ok(void) { return !g_menu_hold; }
  * same. Not set or 1 = nothing changes. (A lockstep clock, a refresh only once the game has queued a frame, never starts
  * this game: it waits for a refresh before its first frame.) */
 static double g_rate = 60.0;                          /* refreshes a second */
+/* TEST ONLY, SMO_SPEED_UNTIL_PLAY=<n>: as SMO_SPEED=<n> until the renderer sees the first play frame (display_play_reached,
+ * nvn_vk_draw.c), then 60 Hz: a benchmark boots and loads fast and is measured at the normal rate. The clock is rebased
+ * so the refresh count the game reads goes on without a jump. */
+static volatile LONG g_rate_back;
+void display_play_reached(void) { if (g_rate != 60.0 && getenv("SMO_SPEED_UNTIL_PLAY")) InterlockedExchange(&g_rate_back, 1); }
 static void speed_init(void) {
+    const char *u = getenv("SMO_SPEED_UNTIL_PLAY");
+    if (u && u[0]) { double s = atof(u); g_rate = s > 0 ? 60.0 * s : 960.0; printf("display: SMO_SPEED_UNTIL_PLAY=%s (TEST ONLY): %.0f Hz until the first play frame, then 60\n", u, g_rate); return; }
     const char *e = getenv("SMO_SPEED");
     if (!e || !e[0]) return;
     double speed = atof(e);
@@ -365,6 +372,12 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
 #endif
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
         for (;;) {
+            if (g_rate_back) {                    /* SMO_SPEED_UNTIL_PLAY: back to 60 Hz from refresh n on */
+                QueryPerformanceCounter(&now);
+                t0.QuadPart = now.QuadPart - (LONGLONG)((double)n * (double)g_freq.QuadPart / 60.0);
+                g_rate = 60.0; InterlockedExchange(&g_rate_back, 0);
+                printf("display: SMO_SPEED_UNTIL_PLAY: first play frame, the refresh clock is at 60 Hz from refresh %lld\n", (long long)n);
+            }
             LONGLONG target = t0.QuadPart + (LONGLONG)((double)(n + 1) * (double)g_freq.QuadPart / g_rate);      /* no accumulated rounding */
             QueryPerformanceCounter(&now);
             LONGLONG left = target - now.QuadPart;

@@ -4956,6 +4956,15 @@ void nvn_label_drop(uint64_t obj) {                  /* the object is finalized:
         if ((*pp)->key == obj) { LabelEnt *e = *pp; *pp = e->next; free(e); break; }
     ReleaseSRWLockExclusive(&g_label_lock);
 }
+void nvn_poolreuse_report(FILE *out);                     /* LOCAL DIAG, below */
+void nvn_label_report(FILE *out) {                       /* LOCAL DIAG: how full the label table is */
+    long n = 0, longest = 0, used = 0;
+    AcquireSRWLockShared(&g_label_lock);
+    for (int i = 0; i < LABEL_N; i++) { long k = 0; for (LabelEnt *e = g_labels[i]; e; e = e->next) k++; n += k; used += k > 0; if (k > longest) longest = k; }
+    ReleaseSRWLockShared(&g_label_lock);
+    fprintf(out, "nvn: labels live at exit %ld in %ld of %d buckets, longest chain %ld\n", n, used, LABEL_N, longest);
+    nvn_poolreuse_report(out);
+}
 static void any_set_label(Ctx *c) {                     /* nvn<Object>SetDebugLabel(object, const char *label) */
     nvn_label_set(A0, A1 ? (const char *)P(A1) : "");
     Tex *t = hobj(A0, K_TEX);
@@ -5532,6 +5541,49 @@ int nvn_front_tex_levels(const Tex *t) {
 /* the back end wrote the texture's own texels into its pool memory (nvnTextureInvalidateTexels in nvn_vk_draw.c):
  * the hash is taken again so that this is not seen as a change by the game, exactly as job_read_texels does for OpenGL. */
 void nvn_front_tex_rehash(Tex *t) { if (t && t->mem) t->hash = mem_hash(t->mem, t->data_size, t->ww_hashed || (t->b.flags & 0x10) != 0); }
+/* LOCAL DIAG (pools-sin-copia), SMO_POOLREUSE=1: every texture read out of a CPU_NO_ACCESS pool registers its range by
+ * 64 KB page; a texture read later whose memory overlaps a range already read is counted, by format pair, by whether the
+ * earlier texture is still alive, and whether it is the same range with the same bytes. Report at exit. */
+typedef struct PrEnt { uint64_t page; const uint8_t *lo, *hi; Tex *t; uint32_t fmt; uint64_t hash; struct PrEnt *next; } PrEnt;
+static PrEnt *g_pr[4096];
+static SRWLOCK g_pr_lock = SRWLOCK_INIT;
+static LONG64 g_pr_first, g_pr_first_mb, g_pr_over, g_pr_over_b, g_pr_exact, g_pr_exact_same, g_pr_alive, g_pr_fmtdiff, g_pr_not1, g_pr_not1_b;
+static struct { uint32_t nf, of; LONG64 n, b; } g_pr_pair[64];
+static int pr_on(void) { static int on = -1; if (on < 0) on = getenv("SMO_POOLREUSE") && atoi(getenv("SMO_POOLREUSE")); return on; }
+static void pr_note(Tex *t, const uint8_t *src, uint64_t h) {
+    const uint8_t *lo = src, *hi = src + t->data_size;
+    AcquireSRWLockExclusive(&g_pr_lock);
+    PrEnt *hit = NULL;
+    for (uint64_t pg = (uint64_t)(uintptr_t)lo >> 16; pg <= ((uint64_t)(uintptr_t)hi - 1) >> 16 && !hit; pg++)
+        for (PrEnt *e = g_pr[pg & 4095]; e; e = e->next)
+            if (e->page == pg && e->t != t && e->lo < hi && lo < e->hi) { hit = e; break; }
+    if (hit) {
+        if (t->pool_flags & 1) { g_pr_over++; g_pr_over_b += (LONG64)t->data_size; } else { g_pr_not1++; g_pr_not1_b += (LONG64)t->data_size; }
+        if (hit->lo == lo && hit->hi == hi) { g_pr_exact++; if (hit->hash == h) g_pr_exact_same++; }
+        if (!hit->t->dead) g_pr_alive++;
+        if (hit->fmt != t->b.format) g_pr_fmtdiff++;
+        int i = 0;
+        while (i < 63 && g_pr_pair[i].n && !(g_pr_pair[i].nf == t->b.format && g_pr_pair[i].of == hit->fmt)) i++;
+        g_pr_pair[i].nf = t->b.format; g_pr_pair[i].of = hit->fmt; g_pr_pair[i].n++; g_pr_pair[i].b += (LONG64)t->data_size;
+    }
+    if (t->pool_flags & 1) {
+        g_pr_first++; g_pr_first_mb += (LONG64)t->data_size;
+        for (uint64_t pg = (uint64_t)(uintptr_t)lo >> 16; pg <= ((uint64_t)(uintptr_t)hi - 1) >> 16; pg++) {
+            PrEnt *e = malloc(sizeof *e);
+            e->page = pg; e->lo = lo; e->hi = hi; e->t = t; e->fmt = t->b.format; e->hash = h; e->next = g_pr[pg & 4095]; g_pr[pg & 4095] = e;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_pr_lock);
+}
+void nvn_poolreuse_report(FILE *out) {
+    if (!pr_on()) return;
+    fprintf(out, "poolreuse: %lld textures read from CPU_NO_ACCESS pools (%lld MB); later reads overlapping one: %lld from CPU_NO_ACCESS (%lld MB), %lld from other pools (%lld MB); "
+                 "same range %lld (same bytes %lld), earlier texture alive %lld, other format %lld\n",
+            (long long)g_pr_first, (long long)(g_pr_first_mb >> 20), (long long)g_pr_over, (long long)(g_pr_over_b >> 20), (long long)g_pr_not1, (long long)(g_pr_not1_b >> 20),
+            (long long)g_pr_exact, (long long)g_pr_exact_same, (long long)g_pr_alive, (long long)g_pr_fmtdiff);
+    for (int i = 0; i < 64 && g_pr_pair[i].n; i++)
+        fprintf(out, "poolreuse:   new format 0x%x over 0x%x: %lld (%lld MB)\n", g_pr_pair[i].nf, g_pr_pair[i].of, (long long)g_pr_pair[i].n, (long long)(g_pr_pair[i].b >> 20));
+}
 int nvn_front_tex_changed(Tex *t) {
     Fmt f;
     if (t->checked == g_serial) return 0;
@@ -5563,6 +5615,7 @@ int nvn_front_tex_changed(Tex *t) {
     t->ww_hashed = newest != 0;
     pf_add(PF_TEXHASH, pf0); g_pf_hash_bytes += (LONG64)t->data_size;
     if (same) return 0;
+    if (!t->uploaded && !t->b.packaged && pr_on()) pr_note(t, src, h);
     t->hash = h; t->uploaded = 1; t->dirty = 0;
     g_st.tex_uploads++;
     return 1;

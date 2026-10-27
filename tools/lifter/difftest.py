@@ -47,7 +47,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(recomp._REPO, 'runtime', 'core')
 LLVM = os.environ.get('LLVM_ROOT', 'C:/llvm-9.0.0')
 MAC = sys.platform == 'darwin'
-HOST_EXE = os.environ.get('DIFFTEST_EXE') or os.path.join(WORK, 'difftest' if MAC else 'difftest.exe')
+HOST_EXE = os.environ.get('DIFFTEST_EXE') or os.path.join(WORK, 'difftest' if T.POSIX else 'difftest.exe')
 
 # the test region, as difftest_host.c maps it: on macOS 0x10_0000_0000 higher, as the guest layout (tools/target.py)
 REGION, REGION_SIZE = 0x7200000000 + T.LAYOUT_SHIFT, 0x400000
@@ -366,6 +366,10 @@ def host_build_cmd(gen_c, out):
         return ['clang', '-O0', '-w', '-fno-strict-aliasing', '-I', RUNTIME, '-I', compat, gen_c, host,
                 os.path.join(compat, 'win32_posix.c'), '-framework', 'CoreFoundation', '-framework', 'AudioToolbox',
                 '-framework', 'CoreGraphics', '-o', out]
+    if T.LINUX:                                           # system clang; the Win32 calls of the harness from the shim
+        compat = os.path.join(recomp._REPO, 'runtime', 'compat')
+        return ['clang', '-O0', '-w', '-fno-strict-aliasing', '-D_GNU_SOURCE', '-I', RUNTIME, '-I', compat, gen_c, host,
+                os.path.join(compat, 'win32_posix.c'), '-lpthread', '-ldl', '-lm', '-o', out]
     return [os.path.join(LLVM, 'bin', 'clang.exe'), '-O0', '-w', '-fno-strict-aliasing', '-I', RUNTIME, gen_c, host, '-o', out]
 
 

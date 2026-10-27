@@ -158,11 +158,11 @@ def main():
         os.makedirs(a.userdata, exist_ok=True)
         a.env.append('SMO_USERDATA=' + os.path.abspath(a.userdata))
     a.exe = exe_name(a.exe)
-    src = os.path.join(BIN, T.EXE)
+    src = os.environ.get('SMO_RUN_EXE_FROM') or os.path.join(BIN, T.EXE)      # the program the copy is made from (bench.py: each label's own)
     exe = os.path.join(BIN, a.exe)
     place = take_place(a.exe)
     try:
-        if a.exe != T.EXE:
+        if a.exe != T.EXE and os.path.abspath(src) != os.path.abspath(exe):
             shutil.copy2(src, exe)
             if os.path.exists(os.path.splitext(src)[0] + '.map'):
                 shutil.copy2(os.path.splitext(src)[0] + '.map', os.path.splitext(exe)[0] + '.map')
