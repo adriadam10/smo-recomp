@@ -2513,6 +2513,60 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
     }
 }
 /* Everything of a draw up to the draw call. topo: NVN primitive. Returns 0 when the draw cannot be done (counted as skipped). */
+static LONG64 g_hud_fixed;                         /* HUD layer draws given the matrix for the window's shape (hud_fix) */
+/* The HUD's and menus' layers at the window's shape (smo_aspect.c fits the world's cameras to it; the layers are left
+ * 16:9 there, as they draw into the game's 16:9 images). A draw whose vertex c3 is nn::ui2d's block - a 16:9 perspective
+ * matrix with its view folded in (c3[0-3]: fovy 15, the camera 2734 units away), the pane's transform in c3[4-6], its
+ * rectangle (width, height, left, top) in c3[33] - gets, in a copy of the block, the matrix that undoes the window's
+ * stretch: on a window taller than 16:9 (16:10) its height times the shape, so the HUD keeps its shape in the middle of
+ * the window; on a wider one its width divided by it. A pane that covers the whole 16:9 height (or width) - a fade, a
+ * background, a screen's picture - keeps the 16:9 matrix and with it fills the window. SMO_ASPECT_HUD=0: off. */
+static int hud_fix(uint64_t addr, uint64_t size, BufRef *b) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("SMO_ASPECT_HUD") && !atoi(getenv("SMO_ASPECT_HUD")));
+    float smo_aspect_shape(void);
+    float sh = smo_aspect_shape();
+    if (!on || sh == 1.0f || size < 64 || !R.col[0].tex || !rs_screen_class(R.col[0].tex->b.width, R.col[0].tex->b.height)) return 0;
+    const float *g = (const float *)(uintptr_t)addr;
+    /* A layer is known by the rows its 16:9 view leaves alone: depth and w (-1.0002, 2733.02 / -1, 2734.47: fovy 15, the
+     * camera 2734 units away). Rows x and y carry the pane's own transform too (a rotated piece - the life meter's
+     * number - has m01, m10; some layers draw upside down, m11 < 0), so the whole row is scaled. */
+    if (!(g[8] == 0 && g[9] == 0 && fabsf(g[10] + 1.0002f) < 1e-4f && fabsf(g[11] - 2733.02f) < 0.05f && g[12] == 0 && g[13] == 0 && g[14] == -1 && fabsf(g[15] - 2734.47f) < 0.05f)) return 0;
+    int tall = sh < 1.0f;
+    float edge = 0;                                /* -1 / +1: the pane reaches the bottom (left) / top (right) edge */
+    if (size >= 136 * 4) {                         /* the pane's corners in normalized device coordinates */
+        const float *mv = g + 16, *rc = g + 132;
+        float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
+        for (int k = 0; k < 4 && rc[0] > 0 && rc[1] > 0; k++) {
+            float x = (float)(k & 1) * rc[0] + rc[2], y = rc[3] - (float)(k >> 1) * rc[1];
+            float wx = mv[0] * x + mv[1] * y + mv[3], wy = mv[4] * x + mv[5] * y + mv[7], wz = mv[8] * x + mv[9] * y + mv[11];
+            float cw = g[12] * wx + g[13] * wy + g[14] * wz + g[15];
+            if (cw <= 0) { lo[0] = 1e9f; break; }
+            float n[2] = {(g[0] * wx + g[1] * wy + g[2] * wz + g[3]) / cw, (g[4] * wx + g[5] * wy + g[6] * wz + g[7]) / cw};
+            for (int a = 0; a < 2; a++) { if (n[a] < lo[a]) lo[a] = n[a]; if (n[a] > hi[a]) hi[a] = n[a]; }
+        }
+        /* the whole screen (a fade, a background, the scene's picture): stretched with the window; any smaller pane
+         * stays in the 16:9 box, so a 2D screen keeps its layout whole (a pane over the whole height only - the side
+         * panel of the controller screen - stretched alone and the screen came apart) */
+        if (lo[0] <= -0.99f && hi[0] >= 0.99f && lo[1] <= -0.99f && hi[1] >= 0.99f) return 0;
+        /* a band over the whole width (height) that reaches an edge - the dark band behind the hints at the bottom -
+         * keeps that edge: anchored to it rather than to the middle, it leaves no strip of the picture without it.
+         * Smaller panes near an edge (the moon counter's digits) stay with the rest of the 16:9 box. */
+        int a = tall ? 1 : 0;
+        if (lo[1 - a] <= -0.99f && hi[1 - a] >= 0.99f) { if (lo[a] <= -0.99f) edge = -1; else if (hi[a] >= 0.99f) edge = 1; }
+    }
+    static float buf[0x10000 / 4];
+    uint64_t n = size > sizeof buf ? sizeof buf : size;
+    memcpy(buf, g, n);
+    /* ndc' = f * ndc + edge * (1 - f): row' = f * row + edge * (1 - f) * row w (g[12..15], whose product is the clip w) */
+    float f = tall ? sh : 1.0f / sh;
+    int r0 = tall ? 4 : 0;
+    for (int k = 0; k < 4; k++) buf[r0 + k] = f * g[r0 + k] + edge * (1.0f - f) * g[12 + k];
+
+    b->zero = 0; b->size = size; b->buf = R.ring; b->off = ring_raw(buf, n);
+    g_hud_fixed++;
+    return 1;
+}
 static int draw_prepare(unsigned prim) {
     {   /* with SMO_VK_PASSSHOT: the state of each draw of that frame (every draw kind passes here) */
             static int want = -2;
@@ -2584,6 +2638,7 @@ static int draw_prepare(unsigned prim) {
             if (n == 0) { b->off = c0_ring(); b->size = 0x614; }
             else if (n == 2) { b->off = c2_ring(s); b->size = sizeof R.c2[s]; }
             else if (n == 1 && st->ctl[3] && st->ctl[4]) { b->size = st->ctl[3]; b->off = ring_put((uint64_t)(uintptr_t)(st->code - 0x30 + st->ctl[4]), b->size); }
+            else if (n == 3 && s == 0 && R.ubo[0][0].addr && R.ubo[0][0].size && hud_fix(R.ubo[0][0].addr, R.ubo[0][0].size, b)) {}      /* a HUD layer at the window's shape */
             else if (n >= 3 && R.ubo[s][n - 3].addr && R.ubo[s][n - 3].size) { g_rp_kind = 0; buf_ref(R.ubo[s][n - 3].addr, R.ubo[s][n - 3].size, sal, b); g_rp_kind = 4; }
             else b->zero = 1;
         }
@@ -4263,6 +4318,7 @@ static void frstat_report(void) {
            (double)w[n / 2], (double)w[n * 99 / 100], (double)w[n - 1], slow, wsum > 0 ? 1000.0 * n / wsum : 0.0);
 }
 static void vkd_shutdown(void) {
+    if (g_hud_fixed) printf("nvn_vk: HUD layer draws drawn at the window's shape (hud_fix): %lld\n", (long long)g_hud_fixed);
     rec_drain();
     wd_stop();
     if (!R.ring) return;
