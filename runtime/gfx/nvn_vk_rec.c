@@ -367,6 +367,14 @@ static void VKAPI_CALL rs_vkCmdCopyImageToBuffer(VkCommandBuffer c, VkImage i, V
     a->c = c; a->i = i; a->l = l; a->b = b; a->n = n; a->r = rec_copy(&x, r, n * sizeof *r);
     rec_commit();
 }
+typedef struct { VkCommandBuffer c; VkImage s; VkImageLayout sl; VkImage d; VkImageLayout dl; uint32_t n; const VkImageCopy *r; } ra_vkCmdCopyImage; RREAL(vkCmdCopyImage)
+static void rx_vkCmdCopyImage(const void *p) { const ra_vkCmdCopyImage *a = p; rr_vkCmdCopyImage(a->c, a->s, a->sl, a->d, a->dl, a->n, a->r); }
+static void VKAPI_CALL rs_vkCmdCopyImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageCopy *r) {
+    ra_vkCmdCopyImage *a = rec_push(rx_vkCmdCopyImage, AL16(sizeof *a) + AL16(n * sizeof *r));
+    uint8_t *x = (uint8_t *)a + AL16(sizeof *a);
+    a->c = c; a->s = s; a->sl = sl; a->d = d; a->dl = dl; a->n = n; a->r = rec_copy(&x, r, n * sizeof *r);
+    rec_commit();
+}
 typedef struct { VkCommandBuffer c; VkImage s; VkImageLayout sl; VkImage d; VkImageLayout dl; uint32_t n; const VkImageBlit *r; VkFilter f; } ra_vkCmdBlitImage; RREAL(vkCmdBlitImage)
 static void rx_vkCmdBlitImage(const void *p) { const ra_vkCmdBlitImage *a = p; rr_vkCmdBlitImage(a->c, a->s, a->sl, a->d, a->dl, a->n, a->r, a->f); }
 static void VKAPI_CALL rs_vkCmdBlitImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageBlit *r, VkFilter f) {
@@ -418,7 +426,7 @@ static void VKAPI_PTR rs_vkCmdPipelineBarrier(VkCommandBuffer c, VkFlags src, Vk
     X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDispatch) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkBeginCommandBuffer) X(vkEndCommandBuffer) \
     X(vkResetCommandBuffer) X(vkQueueSubmit) X(vkQueuePresentKHR) X(vkDeviceWaitIdle) X(vkUpdateDescriptorSets) X(vkCmdBeginRendering) X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) \
     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetBlendConstants) X(vkCmdBindVertexBuffers) X(vkCmdClearAttachments) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) \
-    X(vkCmdBlitImage) X(vkCmdResolveImage) X(vkCmdClearDepthStencilImage) X(vkCmdClearColorImage) X(vkCmdPipelineBarrier)
+    X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkCmdResolveImage) X(vkCmdClearDepthStencilImage) X(vkCmdClearColorImage) X(vkCmdPipelineBarrier)
 /* loaded only with their extensions: swapped when present */
 #define REC_CALLS_OPT(X) X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdSetPolygonModeEXT) X(vkCmdSetDepthClampEnableEXT) X(vkCmdSetAlphaToCoverageEnableEXT) \
     X(vkCmdSetColorBlendEnableEXT) X(vkCmdSetColorBlendEquationEXT) X(vkCmdSetColorWriteMaskEXT) X(vkCmdSetSampleMaskEXT)
