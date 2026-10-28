@@ -358,7 +358,8 @@ static LONG64 g_ts_n;
 #define FRSTAT_N 40000
 static float g_fr_gpu[FRSTAT_N], g_fr_wall[FRSTAT_N];
 static LONG64 g_fr_t[FRSTAT_N];                    /* SMO_FRAMECSV: when the frame was presented (POSIX: CLOCK_MONOTONIC in ns, the clock of perf record -k monotonic) */
-static uint8_t g_fr_play[FRSTAT_N];
+static uint8_t g_fr_play[FRSTAT_N], g_fr_scene[FRSTAT_N];
+static uint16_t g_fr_draws[FRSTAT_N];               /* SMO_FRAMECSV: the frame's draws, and whether it had compute dispatches (g_in_scene) */
 static uint16_t g_fr_vpw[FRSTAT_N], g_fr_vph[FRSTAT_N];      /* SMO_FRAMECSV: the viewport of the frame's main 3D pass (the pass with a depth target and the most draws): the game's dynamic resolution */
 static uint32_t g_fr_vpdraws[FRSTAT_N];
 static uint16_t g_pass_vpw, g_pass_vph; static LONG64 g_pass_draws0; static int g_pass_depth;      /* the pass being recorded: its largest viewport, draws so far at its start, depth target */
@@ -1235,6 +1236,14 @@ static void vt_put(Tex *t, int level, int layer, int w, int h, int d, const void
 static LONG64 g_ta_n, g_ta_bytes, g_ta_tk, g_ta_max_tk, g_late_n, g_late_tk, g_late_scene_n, g_late_scene_tk, g_up_fr_tk, g_up_fr_bytes;
 static int g_up_fr_n, g_ta_inside;
 static volatile LONG g_in_scene;                   /* nvn_vk_pipelines.c (included further down) */
+/* A scene for the window's shape (hud_fix, the present's 16:9 box): a frame with compute dispatches, one of more than
+ * 200 draws while a scene goes on, and it ends only after 3 frames that are neither. Parts of play draw the world without
+ * a dispatch (Top-Hat Tower, Cap Kingdom: the first capture's scene, 307 frames of 224-364 draws; 120 frames of up to
+ * 1,492 a little later; one frame of 132 draws in play), and with g_in_scene alone the HUD went into the box and the bars
+ * came and went: 10 times, 467 frames in the tower. A 2D screen never follows a scene that way: the title and its menus
+ * draw 18-182 without a dispatch, the loading screens at most 60. */
+static volatile LONG g_shape_scene;
+static int g_shape_off = 3;                        /* frames since the last that kept the scene going */
 static LONG64 g_zs_skips, g_zs_bytes, g_zs_checked;
 static int zero_skip_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("SMO_VK_ZERO_SKIP"); on = !(e && e[0] && !atoi(e)); } return on; }
 static int mem_is_zero(const uint8_t *p, size_t n) {       /* 64 bytes at a time, out at the first non-zero byte */
@@ -2696,8 +2705,8 @@ static int hud_fix(uint64_t addr, uint64_t size, BufRef *b) {
     /* A frame that draws no scene (the controller and loading screens, the title's menus) is a 2D screen laid out for
      * 16:9: all of it goes into the 16:9 box, with bars, as on a 16:9 screen (with the rules below its rows came apart:
      * text as wide as the screen anchored to an edge, its pictures in the box). In play the scene fills the window and
-     * the rules below fit the HUD over it. (g_in_scene: the last frame had compute dispatches.) */
-    if (size >= 136 * 4 && g_in_scene) {                         /* the pane's corners in normalized device coordinates */
+     * the rules below fit the HUD over it. (g_shape_scene: the last frame drew a scene.) */
+    if (size >= 136 * 4 && g_shape_scene) {                         /* the pane's corners in normalized device coordinates */
         const float *mv = g + 16, *rc = g + 132;
         float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
         for (int k = 0; k < 4 && rc[0] > 0 && rc[1] > 0; k++) {
@@ -4312,7 +4321,7 @@ swap: ;
                  * around it (the title's 3D Mario below the menu, the loading screen's icon) does not spill into the bars. */
                 float smo_aspect_shape(void);
                 float shp = smo_aspect_shape();
-                if (shp != 1.0f && !g_in_scene && !progress) {
+                if (shp != 1.0f && !g_shape_scene && !progress) {
                     VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f;
                     vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr);
                     VkImageMemoryBarrier wb = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -4335,12 +4344,14 @@ swap: ;
             vkCmdBlitImage(R.cmd, vt->img, LAYOUT(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL), V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
         } else { VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f; vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr); }
         overlay_draw(index);
-        /* SMO_SWAPSHOT=<frame> (debug aid): the window's image as presented in that frame, to <SMO_SHOT_DIR>/swap_<frame>.bmp
-         * (the game's own screenshots are its picture before the present: they do not show what the present does) */
-        static int swf = -2;
-        if (swf == -2) swf = getenv("SMO_SWAPSHOT") ? atoi(getenv("SMO_SWAPSHOT")) : -1;
+        /* SMO_SWAPSHOT=<frame>[,<frame>...] (debug aid, up to 32): the window's image as presented in those frames, to
+         * <SMO_SHOT_DIR>/swap_<frame>.bmp (the game's own screenshots are its picture before the present: they do not show
+         * what the present does) */
+        static int swn = -1; static long long swl[32];
+        if (swn < 0) { swn = 0; const char *e = getenv("SMO_SWAPSHOT"); for (char *q = (char *)e; e && *q && swn < 32; ) { swl[swn++] = strtoll(q, &q, 10); if (*q == ',') q++; else break; } }
+        int swat = 0; for (int i = 0; i < swn; i++) swat |= swl[i] == frame;
         VkBuffer swbuf = NULL; VMem swmem; memset(&swmem, 0, sizeof swmem);
-        if (swf >= 0 && frame == swf && !progress) {
+        if (swat && !progress) {
             VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
             VkMemoryRequirements rq;
             bi.size = (VkDeviceSize)V.extent.width * V.extent.height * 4; bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -4393,7 +4404,7 @@ swap: ;
     g_tm[4] += tk() - t_present;
     nvn_front_frame_end(R.frame_draws, R.frame_skipped, R.frame_clears);
     passshot_update();                             /* the next frame */
-    { static LONG64 disp_prev; g_in_scene = R.dispatches != disp_prev; disp_prev = R.dispatches; if (g_in_scene) { g_scene_last = frame; g_scene_frames++; } g_frames_counted++; }      /* a frame with compute dispatches: the game draws a scene */
+    { static LONG64 disp_prev; g_in_scene = R.dispatches != disp_prev; disp_prev = R.dispatches; if (g_in_scene || (g_shape_scene && R.frame_draws > 200)) g_shape_off = 0; else if (g_shape_off < 3) g_shape_off++; g_shape_scene = g_shape_off < 3; if (g_in_scene) { g_scene_last = frame; g_scene_frames++; } g_frames_counted++; }      /* a frame with compute dispatches: the game draws a scene */
     {   /* per-frame record for the "nvn_vk_gpu_play:" line */
         static LONG64 t_prev;
         LONG64 t_now = tk();
@@ -4409,7 +4420,7 @@ swap: ;
         }
         if (frame >= 0 && frame < FRSTAT_N) {
             LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
-            g_fr_play[frame] = (uint8_t)play;
+            g_fr_play[frame] = (uint8_t)play; g_fr_scene[frame] = (uint8_t)g_in_scene; g_fr_draws[frame] = (uint16_t)(R.frame_draws > 65535 ? 65535 : R.frame_draws);
 #ifdef _WIN32
             g_fr_t[frame] = t_now;
 #else
@@ -4604,9 +4615,9 @@ static void frstat_csv(void) {
     FILE *f = fopen(path, "w");
     if (!f) { printf("nvn_vk: SMO_FRAMECSV: cannot write %s\n", path); return; }
     LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
-    fprintf(f, "frame,play,wall_ms,gpu_ms,vp_w,vp_h,t_s\n");
+    fprintf(f, "frame,play,wall_ms,gpu_ms,vp_w,vp_h,t_s,scene,draws\n");
     for (long long i = 0; i < g_cur_frame && i < FRSTAT_N; i++)
-        fprintf(f, "%lld,%d,%.3f,%.3f,%u,%u,%.6f\n", i, g_fr_play[i], (double)g_fr_wall[i], (double)g_fr_gpu[i], g_fr_vpw[i], g_fr_vph[i], (double)g_fr_t[i] / (double)fq.QuadPart);      /* QueryPerformanceFrequency: ns on POSIX too */
+        fprintf(f, "%lld,%d,%.3f,%.3f,%u,%u,%.6f,%u,%u\n", i, g_fr_play[i], (double)g_fr_wall[i], (double)g_fr_gpu[i], g_fr_vpw[i], g_fr_vph[i], (double)g_fr_t[i] / (double)fq.QuadPart, g_fr_scene[i], g_fr_draws[i]);      /* QueryPerformanceFrequency: ns on POSIX too */
     fclose(f);
     printf("nvn_vk: SMO_FRAMECSV: %lld frames written to %s\n", (long long)(g_cur_frame < FRSTAT_N ? g_cur_frame : FRSTAT_N), path);
 }

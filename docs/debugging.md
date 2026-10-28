@@ -294,7 +294,7 @@ The end of every log has the counts that tell whether a run was healthy:
   one as wide as the screen that touches its top or bottom stays at that edge. A frame without a scene is a 2D screen:
   all of it in the box, and the present shows only the box (bars). `nvn_vk: HUD layer draws drawn at the window's
   shape` counts them at exit; `SMO_ASPECT_HUD=0`: off.
-- `SMO_SWAPSHOT=<frame>` saves the window's image of that frame as presented (`swap_<frame>.bmp` in `SMO_SHOT_DIR`);
+- `SMO_SWAPSHOT=<frame>[,<frame>...]` saves the window's image of those frames (up to 32) as presented (`swap_<frame>.bmp` in `SMO_SHOT_DIR`);
   the game's screenshots are its picture before the present.
 
 ## Other switches
