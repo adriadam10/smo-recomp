@@ -99,6 +99,10 @@ The end of every log has the counts that tell whether a run was healthy:
   above `sh_join`); one written to (a copy or a draw into it) first gets an image of its own. The exit line `textures
   sharing the image of another` counts them and the memory not allocated; `SMO_VK_TEXSHARE=0` gives every texture its
   own image, as before.
+  A new texture made over the very memory of such a texture that the GPU drew into (agl's screen buffers, made again
+  every frame over the same storage), with the same builder and not bound or used in this frame, takes its image instead
+  of a new one (`rt_reuse`); the exit line `images of let-go targets taken by new textures` counts them and
+  `SMO_VK_RTREUSE=0` makes a new image, as before.
 - Flicker that shows in single frames: save every frame of a stretch (`SMO_SHOT_EVERY=1 SMO_SHOT_FROM=<a> SMO_SHOT_TO=<b>
   SMO_SHOT_DIR=<folder>`), then `tools\dev\flicker.py <folder>` lists the frames where a region of the picture is brighter
   or darker than in both neighbours, and saves them side by side. To see what such a frame drew differently, run the same
