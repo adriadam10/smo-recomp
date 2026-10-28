@@ -309,6 +309,7 @@ static bool SDLCALL window_event(void *arg, SDL_Event *e) {
         int vk = nnpad_hotkey_vk(0);
         if (e->key.scancode == SDL_SCANCODE_F11) display_toggle_fullscreen();
         else if (e->key.scancode == SDL_SCANCODE_F12) smo_capture_request();          /* F12 = the console's Capture button */
+        else if (e->key.scancode == SDL_SCANCODE_F10) perf_overlay_toggle();           /* F10 = the performance overlay (perf_overlay.c) */
         else if (vk && e->key.scancode == scancode_of_vk(vk)) amiibo_menu_request();   /* controllers.ini [hotkeys], F1 by default */
     }
     return true;
