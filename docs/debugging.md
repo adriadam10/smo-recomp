@@ -173,13 +173,15 @@ The end of every log has the counts that tell whether a run was healthy:
   every program and stage walked the list from its start, 1.7 s in one frame), which `runtime/game/smo_sharc.c` goes on
   from the last walk of the same list; `SMO_SHARC=2` lets the game walk and compares the two at the end of each walk
   (`smo_sharc: ... differ` in the exit report).
-- Switches that bring back an older behaviour, for comparisons: `SMO_VK_OCC_SYNC=1` (every occlusion report waits for the
-  GPU), `SMO_VK_OCC_PRESENT=0` (occlusion results are not waited for at the present), `SMO_VK_RING_DRAIN=1` (the stream
-  ring waits for the GPU at every wrap), `SMO_TEXHASH_ALL=1` (textures are hashed whatever their memory pool),
+- Switches that bring back an older behaviour, for comparisons: `SMO_VK_FENCE_LATE=0` (a game fence wait waits for that
+  very frame, not the one before), `SMO_VK_OCC_SYNC=1` (every occlusion report waits for the GPU),
+  `SMO_VK_OCC_PRESENT=0` (occlusion results are not waited for at the present), `SMO_VK_RING_DRAIN=1` (the stream ring
+  waits for the GPU at every wrap), `SMO_TEXHASH_ALL=1` (textures are hashed whatever their memory pool),
   `SMO_VK_NO_TEXBARRIER=1` (the game's fragment-order barriers are ignored), `SMO_SYNC_SUBMIT=1` (every submit waits for
   the render thread), `SMO_VK_VTXGROW=0` (vertex streams are copied only as far as the range the game bound, even when
-  the draw reads further; `SMO_VK_VTXCHECK=1` logs each kind of draw that does). `SMO_PRESENT_ASYNC=0` makes the present wait for the render thread again (by default it does not: one frame in flight);
-  `SMO_VK_OCC_LOG=1` logs the conditional renders that had to wait for an occlusion result.
+  the draw reads further; `SMO_VK_VTXCHECK=1` logs each kind of draw that does). `SMO_PRESENT_ASYNC=0` makes the present
+  wait for the render thread again (by default it does not: one frame in flight); `SMO_VK_OCC_LOG=1` logs the
+  conditional renders that had to wait for an occlusion result.
 
 ## Memory
 
