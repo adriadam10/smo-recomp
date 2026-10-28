@@ -132,6 +132,11 @@ to `tools/lifter/sdklift_rules.txt` run `--redo sdk`; after a change to the runt
   shakes for real; on any pad, hold the left stick button, and on the keyboard Space - the game then reads a controller
   shaken side to side. Set in `controllers.ini`, section `[hotkeys]` (`shake`, `shake_pad`).
 - The Capture button: F12, or a pad's share button, saves the frame as a BMP in the save folder's `album`.
+- F10: the performance overlay in the window's corner, cycling off, frame rate (frames per second and milliseconds) and
+  full: a graph of the last 120 frames, the GPU time of a frame, the size the game draws its 3D scene at (it lowers it
+  when the GPU falls behind), CPU time per frame of the main and render threads, frames over 33 ms in the last minute,
+  and the machine's CPU, memory and, on Linux with an AMD GPU, the GPU's use, temperature, power, clock and memory.
+  `perf_overlay = off | fps | full` in `graphics.ini` sets how it starts; screenshots never have it.
 - Translated shaders are cached in `build\cache\vk`. The `shaders` step compiles every stage of the game to SPIR-V
   there before the first run (compiling is nearly all of a stage's cost); what the game still meets for the first time
   (other variants, pipelines, the driver's own compilation) is done in play and reused by later runs.
