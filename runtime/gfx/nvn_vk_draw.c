@@ -1009,9 +1009,9 @@ static int g_rs_step = -1;                         /* the F9 step in use (k_rs_s
 static LONG64 g_rs_images, g_rs_stages, g_rs_fcs, g_rs_tf, g_rs_up, g_rs_down, g_rs_blits;
 static float rs_auto(void) {                       /* auto: the window's size (the swapchain is made before the first image), so no pixel is drawn only to be scaled down */
     float sw = (float)V.extent.width / 1600.0f, sh = (float)V.extent.height / 900.0f, v = sw < sh ? sw : sh;
-    return v > 0 ? v : 1.0f;
+    return v > 1.0f || v <= 0 ? 1.0f : v;       /* at most 1.0: above it is supersampling, asked for with a number */
 }
-static float rs_clamp(float v) { return v < 0.25f ? 0.25f : v > 1.0f ? 1.0f : v; }      /* above 1.0 (supersampling) is not offered: not tested */
+static float rs_clamp(float v) { return v < 0.25f ? 0.25f : v > 2.0f ? 2.0f : v; }      /* above 1.0 = supersampling: at 2.0 the picture is 3200 x 1800, 4x the GPU work */
 static float rs_scale(void) {
     if (g_rs < 0) {
         const char *e = getenv("SMO_VK_SCALE");

@@ -60,11 +60,12 @@ static const char *const k_default_ini =
 ";   What nn::oe::GetOperationMode answers. Leave it at docked: handheld is not measured on PC.\r\n"
 "console_mode = docked\r\n"
 "\r\n"
-"; resolution_scale = auto | 0.25 .. 1.0\r\n"
+"; resolution_scale = auto | 0.25 .. 2.0\r\n"
 ";   Internal resolution scale (Vulkan only; OpenGL ignores it). 1.0 = the game's own (its picture is 1600x900).\r\n"
 ";   0.75 = 1200x675, 0.5 = 800x450: the main switch for a weak GPU. The whole picture is drawn smaller, the 2D\r\n"
 ";   interface too (it gets softer), and is scaled to the window size. auto: the window's size at start, at most\r\n"
-";   1.0 (a 1280x720 window: 0.8), so no pixel is drawn only to be scaled down.\r\n"
+";   1.0 (a 1280x720 window: 0.8), so no pixel is drawn only to be scaled down. Above 1.0 it is drawn larger and\r\n"
+";   scaled down (1.2 = 1920x1080, 1.5 = 2400x1350, 2.0 = 3200x1800): a sharper picture for a GPU with time to spare.\r\n"
 ";   F9 / Shift+F9 step it while the game runs (auto, 1.0, 0.85, 0.75, 0.67, 0.5) and write it here.\r\n"
 "resolution_scale = auto\r\n"
 "\r\n"
@@ -177,7 +178,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
            o->pause_unfocused ? "pause" : "run", k_vs[o->present], o->gpu[0] ? o->gpu : "auto", o->handheld ? "handheld" : "docked", scale, o->aniso, o->overlay ? "on" : "off", o->perf_overlay == 2 ? "full" : o->perf_overlay ? "fps" : "off",
            unknown ? " (lines with an unknown key were ignored)" : "");
     if (o->scale != 1.0f && o->renderer) printf("graphics options: resolution_scale=%s is ignored by the OpenGL renderer (Vulkan only)\n", scale);
-    if (o->scale != 1.0f && o->scale > 0 && (o->scale < 0.25f || o->scale > 1.0f)) printf("graphics options: resolution_scale=%.2f is outside 0.25 .. 1.0: the nearest of the two is used\n", o->scale);
+    if (o->scale != 1.0f && o->scale > 0 && (o->scale < 0.25f || o->scale > 2.0f)) printf("graphics options: resolution_scale=%.2f is outside 0.25 .. 2.0: the nearest of the two is used\n", o->scale);
     fflush(stdout);
     return TRUE;
 }
