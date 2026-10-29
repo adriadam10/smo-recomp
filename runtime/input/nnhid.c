@@ -489,9 +489,13 @@ static int draw_class(long d) { return d <= 12 ? 0 : d <= 60 ? 1 : d <= 240 ? 2 
 
 static void anchor_tick(void) {                           /* once per poll */
     if (g_anchor < 0) {
-        if (!mark_seen("movie")) return;
+        /* a save resumed from the title plays no movie: then the first frame of play (a stretch of play recorded by
+         * hand and replayed after the same resume, e.g. bench.py's scenes) */
+        int nerve_active(const char *name);           /* smo_nerve.c */
+        int movie = mark_seen("movie");
+        if (!movie && !nerve_active("StageSceneNrvPlay")) return;
         g_anchor = 0; g_anchor_poll = g_rec_poll; g_anchor_class = -1; g_anchor_cand = -1;
-        printf("input anchor 0 at poll %lld: the first movie created\n", g_rec_poll);
+        printf("input anchor 0 at poll %lld: %s\n", g_rec_poll, movie ? "the first movie created" : "the first frame of play (no movie)");
         return;
     }
     int cls = draw_class(g_frame_draws_seen);
@@ -543,7 +547,7 @@ static void record_or_replay(uint64_t *buttons, int *lx, int *ly) {
             g_play_pos++;
         }
         if (g_play_pos > 0 && (g_play[g_play_pos - 1].anchor >= 0 || g_play[g_play_pos - 1].poll >= 0)) { *buttons = g_play[g_play_pos - 1].buttons; *lx = g_play[g_play_pos - 1].lx; *ly = g_play[g_play_pos - 1].ly; }
-        else { *buttons = 0; *lx = 0; *ly = 0; }
+        else if (!getenv("SMO_SEQ")) { *buttons = 0; *lx = 0; *ly = 0; }      /* with SMO_SEQ (menus up to play) its inputs go through until the first change is due */
         return;
     }
     if (g_rec && g_anchor >= 0 && (*buttons != g_rec_buttons || *lx != g_rec_lx || *ly != g_rec_ly)) {

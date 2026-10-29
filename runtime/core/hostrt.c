@@ -574,6 +574,7 @@ void report_and_exit(int code) {
     { void smo_fast_report(FILE *out); smo_fast_report(stdout); }     /* smo_fast.c */
     { void smo_yaz0_report(FILE *out); smo_yaz0_report(stdout); }     /* smo_yaz0.c */
     { void smo_sharc_report(FILE *out); smo_sharc_report(stdout); }   /* smo_sharc.c */
+    { void nvn_vk_passtime_report(void); nvn_vk_passtime_report(); }   /* nvn_vk_draw.c */
     { void nvn_vk_zero_skip_report(FILE *out); nvn_vk_zero_skip_report(stdout); }   /* nvn_vk_draw.c */
     { void nerve_report(FILE *out); nerve_report(stdout); }   /* smo_nerve.c */
     { void fontll_report(FILE *out); fontll_report(stdout); }   /* nnfontll.c */
@@ -716,8 +717,15 @@ static void host_module_line(const char *indent, uint64_t pc) {
     const char *bn = strrchr(mod, '\\');
     printf("%s%s+0x%llx\n", indent, bn ? bn + 1 : mod, (unsigned long long)(pc - (uintptr_t)m));
 }
+int (*volatile g_fault_hook)(void *addr, int writing, uint64_t pc);      /* a measurement that traps accesses (nvn_vk_draw.c cb_trap): 1 = handled, retry */
 static void crash_signal(int sig, siginfo_t *si, void *ucv) {
     static volatile int in_report;
+#if !defined(__APPLE__)
+    if (sig == SIGSEGV && g_fault_hook) {
+        ucontext_t *u = ucv;
+        if (g_fault_hook(si->si_addr, (u->uc_mcontext.gregs[REG_ERR] & 2) != 0, (uint64_t)u->uc_mcontext.gregs[REG_RIP])) return;
+    }
+#endif
     if (sig == SIGSEGV || sig == SIGBUS) recomp_try_catch();        /* a fault inside a __try probe goes to its __except */
     if (__atomic_exchange_n(&in_report, 1, __ATOMIC_SEQ_CST)) _exit(4);     /* a fault inside the report */
     ucontext_t *uc = ucv;

@@ -115,7 +115,30 @@ static void pool_account(uint64_t flags, int64_t bytes) {
     if (g_pool_kind[i].live > g_pool_kind[i].peak) g_pool_kind[i].peak = g_pool_kind[i].live;
     ReleaseSRWLockExclusive(&g_pool_kind_lock);
 }
-static void pool_finalize(Ctx *c) { NvnObj *p = nobj(A0); if (p->size && !(p->flags & 0x200)) pool_account(p->flags, -(int64_t)p->size); nvn_label_drop(A0); nobj_drop(A0); }
+/* every initialised pool's storage and flags: which pool an address lies in (nvn_pool_flags_at, the renderer's
+ * compute copy-back census) */
+static struct { uint64_t key, mem, size; uint32_t flags; } *g_preg;
+static int g_preg_n, g_preg_cap;
+static SRWLOCK g_preg_lock = SRWLOCK_INIT;
+static void preg_add(uint64_t key, uint64_t mem, uint64_t size, uint32_t flags) {
+    AcquireSRWLockExclusive(&g_preg_lock);
+    if (g_preg_n == g_preg_cap) { g_preg_cap = g_preg_cap ? g_preg_cap * 2 : 256; g_preg = realloc(g_preg, sizeof *g_preg * (size_t)g_preg_cap); }
+    g_preg[g_preg_n].key = key; g_preg[g_preg_n].mem = mem; g_preg[g_preg_n].size = size; g_preg[g_preg_n++].flags = flags;
+    ReleaseSRWLockExclusive(&g_preg_lock);
+}
+static void preg_drop(uint64_t key) {
+    AcquireSRWLockExclusive(&g_preg_lock);
+    for (int i = 0; i < g_preg_n; i++) if (g_preg[i].key == key) { g_preg[i] = g_preg[--g_preg_n]; break; }
+    ReleaseSRWLockExclusive(&g_preg_lock);
+}
+int nvn_pool_flags_at(uint64_t addr) {             /* -1: in no pool */
+    int f = -1;
+    AcquireSRWLockShared(&g_preg_lock);
+    for (int i = 0; i < g_preg_n; i++) if (addr >= g_preg[i].mem && addr < g_preg[i].mem + g_preg[i].size) { f = (int)g_preg[i].flags; break; }
+    ReleaseSRWLockShared(&g_preg_lock);
+    return f;
+}
+static void pool_finalize(Ctx *c) { preg_drop(A0); NvnObj *p = nobj(A0); if (p->size && !(p->flags & 0x200)) pool_account(p->flags, -(int64_t)p->size); nvn_label_drop(A0); nobj_drop(A0); }
 static void obj_set_label(Ctx *c) { nvn_label_set(A0, A1 ? (const char *)(uintptr_t)A1 : ""); }
 /* FlushMappedRange(object, offset, size): the CPU wrote this range and the GPU must see it. Pool memory is ordinary host memory here,
  * so what has to be told is the backend, which keeps copies of textures. */
@@ -136,6 +159,7 @@ static void pool_initialize(Ctx *c) {
     p->memory = b->memory; p->size = b->size; p->flags = b->flags; p->pool = p->offset = 0;
     if (p->flags & 0x200) { pool_virtual_init(c, A0, p); RET(1); return; }   /* NVN_MEMORY_POOL_FLAGS_VIRTUAL */
     if (p->size) pool_account(p->flags, (int64_t)p->size);
+    if (p->memory && p->size) preg_add(A0, p->memory, p->size, (uint32_t)p->flags);
     RET(1);
 }
 static void pool_flags(Ctx *c) { RET(nobj(A0)->flags); }
@@ -232,12 +256,16 @@ static uint64_t vp_reserve(uint64_t size) {
 }
 #ifdef __linux__
 int smo_heap_memfd(void);                                          /* smo_nn.c */
-/* Linux: the heap is a shared mapping of a memfd (smo_nn.c): a view is the same file range mapped at the second address.
+/* Linux, with SMO_HEAP_MEMFD=1: the heap is a shared mapping of a memfd (smo_nn.c), and a view is the same file range
+ * mapped at the second address. Otherwise the heap is private memory and has no second view.
  * The caller has checked that the range lies in the committed heap (smo_heap_section_offset). */
 static int vp_view(HANDLE sec, uint64_t at, uint64_t sec_off, uint64_t size) {
     (void)sec;
     int fd = smo_heap_memfd();
-    if (fd < 0) { SetLastError(0); return 0; }
+    if (fd < 0) {
+        printf("nvn: the heap is private memory (so that Vulkan can import it): run with SMO_HEAP_MEMFD=1 for a heap whose pages can be viewed twice\n");
+        SetLastError(0); return 0;
+    }
     void *p = mmap((void *)(uintptr_t)at, (size_t)size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, (off_t)sec_off);
     if (p != (void *)(uintptr_t)at) { SetLastError((DWORD)errno); return 0; }
     return 1;

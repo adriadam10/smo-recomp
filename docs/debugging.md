@@ -126,14 +126,19 @@ The end of every log has the counts that tell whether a run was healthy:
   initialisation thread) and how long the hand-over held them.
 - Speed switches, each bringing back the way before (for comparisons): `SMO_VK_HOSTMEM=0` (vertex and index ranges
   copied into the stream ring instead of read in place from the game's heap, imported into Vulkan with
-  VK_EXT_external_memory_host), `SMO_VK_TSET_CACHE=0` (texture descriptor sets per command buffer instead of kept
+  VK_EXT_external_memory_host; only the parts of the heap draws read are imported, `SMO_VK_HOSTMEM_MB=<n>` at most:
+  512 on Linux, where everything imported costs at each submission), `SMO_HEAP_MEMFD=1` (Linux: the heap a shared memfd
+  mapping, as before, so a virtual memory pool can view its pages twice; amdgpu does not import it, so vertex and index
+  ranges are copied), `SMO_HEAP_THP=1` (Linux: transparent huge pages in the heap as the kernel's setting says),
+  `SMO_VK_TSET_CACHE=0` (texture descriptor sets per command buffer instead of kept
   across them), `SMO_VK_OCC_LATE=0` (a conditional render waits for the occlusion count it compares instead of using the
   last frame's), `SMO_VK_RT_UPLOAD=1` (a render target the game makes again is read from guest memory),
   `SMO_VK_TEXAHEAD_LOAD=0` (no larger texture budget during loading screens), `SMO_VK_DYN_ALL=1` (every dynamic state
   sent at every draw), `SMO_FAST_SKIP=0` (registerSampler's free-slot walk one lifted call per slot), `SMO_HOST_PIN=0`
   (the render thread, the pipeline workers and the renderer's helper threads anywhere instead of away from the console
   cores; `SMO_HOST_CPUS=<hex mask>` chooses their processors, `SMO_HOST_LAYOUT=1` gives the render thread a core of its
-  own). `SMO_VK_MT=1` (off by default) runs the look-ahead over a batch on a thread of its own beside the replay.
+  own). `SMO_VK_MT=0` runs the look-ahead over a batch on the render thread before the replay instead of on a thread of its own
+  beside it.
   `SMO_VK_RECORDER=1` (off by default) has a thread of its own make the Vulkan calls the render thread recorded (vkCmd*,
   descriptor writes, submissions); `nvn_vk_rec:` every 300 frames says how busy it was and how long the render thread
   waited for it. The build: `RECOMP_OPT` (lifted code) and `RECOMP_HOST_OPT` (runtime), both `-O2` by default;
@@ -319,6 +324,9 @@ The end of every log has the counts that tell whether a run was healthy:
   one as wide as the screen that touches its top or bottom stays at that edge. A frame without a scene is a 2D screen:
   all of it in the box, and the present shows only the box (bars). `nvn_vk: HUD layer draws drawn at the window's
   shape` counts them at exit; `SMO_ASPECT_HUD=0`: off.
+- `SMO_PERF_OVERLAY=0|1|2` starts the performance overlay off, at frame rate or full, whatever `graphics.ini` says
+  (`runtime/gfx/perf_overlay.c`; F10 cycles it). The full overlay writes the renderer's timestamp queries while it is shown,
+  as `SMO_VK_GPUTIME=1` does.
 - `SMO_SWAPSHOT=<frame>[,<frame>...]` saves the window's image of those frames (up to 32) as presented (`swap_<frame>.bmp` in `SMO_SHOT_DIR`);
   the game's screenshots are its picture before the present.
 

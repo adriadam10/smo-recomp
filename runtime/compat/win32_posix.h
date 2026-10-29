@@ -398,6 +398,7 @@ _Static_assert(sizeof(BITMAPFILEHEADER) == 14 && sizeof(BITMAPINFOHEADER) == 40,
 #define VK_DOWN 0x28
 #define VK_NUMPAD0 0x60
 #define VK_F1 0x70
+#define VK_F10 0x79
 #define VK_F11 0x7A
 #define VK_F12 0x7B
 SHORT GetAsyncKeyState(int vk);                   /* 0x8000 while the key is down */
