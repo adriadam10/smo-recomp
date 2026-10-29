@@ -157,6 +157,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     if (m == WM_ERASEBKGND) return 1;
     if (m == WM_KEYDOWN && w == VK_F10 && !(l & (1 << 30))) { perf_overlay_toggle(); return 0; }     /* F10 = the performance overlay (perf_overlay.c) */
+    if (m == WM_KEYDOWN && w == VK_F9 && !(l & (1 << 30))) { void nvn_vk_scale_step(int dir); nvn_vk_scale_step(GetKeyState(VK_SHIFT) < 0 ? -1 : 1); return 0; }     /* F9 / Shift+F9 = the next / previous internal resolution scale (nvn_vk_draw.c) */
     if (m == WM_KEYDOWN && w == VK_F12 && !(l & (1 << 30))) {      /* F12 = the console's Capture button (once per press) */
         void smo_capture_request(void);
         smo_capture_request();
@@ -311,6 +312,7 @@ static bool SDLCALL window_event(void *arg, SDL_Event *e) {
         if (e->key.scancode == SDL_SCANCODE_F11) display_toggle_fullscreen();
         else if (e->key.scancode == SDL_SCANCODE_F12) smo_capture_request();          /* F12 = the console's Capture button */
         else if (e->key.scancode == SDL_SCANCODE_F10) perf_overlay_toggle();           /* F10 = the performance overlay (perf_overlay.c) */
+        else if (e->key.scancode == SDL_SCANCODE_F9) { void nvn_vk_scale_step(int dir); nvn_vk_scale_step(e->key.mod & SDL_KMOD_SHIFT ? -1 : 1); }      /* F9 / Shift+F9 = the next / previous internal resolution scale (nvn_vk_draw.c) */
         else if (vk && e->key.scancode == scancode_of_vk(vk)) amiibo_menu_request();   /* controllers.ini [hotkeys], F1 by default */
     }
     return true;

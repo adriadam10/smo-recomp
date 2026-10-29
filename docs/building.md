@@ -140,6 +140,10 @@ to `tools/lifter/sdklift_rules.txt` run `--redo sdk`; after a change to the runt
   in the last minute; and the picture: the window, the game's image and the size it is rendered at, the 3D scene the
   game draws in it (it lowers it when the GPU falls behind), the scaling to the window, the frame limit and the present
   mode. `perf_overlay = off | fps | full` in `graphics.ini` sets how it starts; screenshots never have it.
+- F9 / Shift+F9: the next / previous internal resolution scale while the game runs (auto, 100, 85, 75, 67 and 50 %;
+  Vulkan only), written to `resolution_scale` in `graphics.ini`. The game's screen images are made again at the new
+  size, so one frame may show part of the picture missing; the first step below 100 % in a run that started at 100 %
+  also translates the fragment shaders again as the game meets them (a stutter while they compile).
 - Translated shaders are cached in `build\cache\vk`. The `shaders` step compiles every stage of the game to SPIR-V
   there before the first run (compiling is nearly all of a stage's cost); what the game still meets for the first time
   (other variants, pipelines, the driver's own compilation) is done in play and reused by later runs.
