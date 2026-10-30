@@ -72,6 +72,8 @@ The end of every log has the counts that tell whether a run was healthy:
   (`fold_ipa_w` in `mx_translate.c` drops it where the register surely holds `1 / w`).
 - `SMO_MX_NO_XMAD_FOLD=1` keeps the three 16-bit XMADs of every 32-bit integer multiply (`fold_xmad` in
   `mx_translate.c` turns each into one `x * y` where the three lines only fall through).
+- `SMO_MX_NO_C1_INLINE=1` (Vulkan) reads constant buffer 1 (the shader's own immediate data) from its buffer again,
+  instead of writing each word read at a constant index into the text as a literal.
 - Equivalence harness: `tests\build_mx_equiv.py`, then from `build\bin`: `mx_equiv.exe <folder of vk_prog_*.bin> [max]`.
 - `tests\check_all_shaders.py` takes every shader stage out of the game's shader archives (agl `.sharcb`, g3d `.bfsha`,
   the effect `.ptcl`, nested archives, `main` and `sdk`) into `build\shaders_all`, translates each with the Vulkan back
