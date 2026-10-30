@@ -34,6 +34,7 @@ void nvn_gl_memory_written(uint64_t addr, uint64_t size) { (void)addr; (void)siz
 ImportFn nvn_gl_pick(const char *name) { (void)name; return NULL; }
 void nvn_label_set(uint64_t obj, const char *text) { (void)obj; (void)text; }
 void nvn_label_drop(uint64_t obj) { (void)obj; }
+void nvn_label_report(FILE *out) { (void)out; }
 static ImportFn g_bootstrap;
 void register_imports(const ImportDef *defs, int count) {
     for (int i = 0; i < count; i++) if (!strcmp(defs[i].name, "nvnBootstrapLoader")) g_bootstrap = defs[i].fn;
@@ -71,9 +72,11 @@ static uint64_t call(const char *name, uint64_t a0, uint64_t a1, uint64_t a2) {
     fn(name)(&c);
     return c.x[0];
 }
-static uint64_t g_key = 0x100000;                                   /* guest objects: only their addresses matter */
+/* guest objects (a builder and a pool, 0x100 bytes each, as NVNmemoryPool): the runtime keeps a pool's state inside it */
+static _Alignas(16) uint8_t g_objs[64][0x100];
+static int g_nobj;
 static uint64_t pool(uint64_t memory, uint64_t size, uint64_t flags) {
-    uint64_t b = g_key += 0x100, p = g_key += 0x100;
+    uint64_t b = (uint64_t)(uintptr_t)g_objs[g_nobj++], p = (uint64_t)(uintptr_t)g_objs[g_nobj++];
     call("nvnMemoryPoolBuilderSetDefaults", b, 0, 0);
     call("nvnMemoryPoolBuilderSetStorage", b, memory, size);
     call("nvnMemoryPoolBuilderSetFlags", b, flags, 0);
