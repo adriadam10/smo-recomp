@@ -1752,11 +1752,15 @@ static const char *const k_prelude =
 /* IPA "multiply" by 1 / w undoes the * w of IPA "pass": every read of a perspective varying is emitted as
  * f = attr; f *= gl_FragCoord.w; f *= F(rK) with rK = 1.0 / gl_FragCoord[3] (the shader's MUFU.RCP of the position's
  * IPA), two multiplies the driver cannot fold (w * (1 / w) is not 1 in floats). Measured over the game's 20,436
- * fragment stages: 262,424 such reads in 19,091 of them. Both multiplies are dropped where rK surely holds 1 / w: within
- * one run of unconditional instruction lines (each emitted as "{ ... }"; any other line is control flow or predicated
- * and forgets everything), after a line that set rK to the reciprocal of a register set to gl_FragCoord[3], and before
- * the next write of rK. The varying is then the value Vulkan interpolated, as on the console up to rounding; the same
- * fold as Savage Wind's glsl_fold_ipa_w (-8 % ACO instructions there). */
+ * fragment stages: 262,424 such reads in 19,091 of them. Both multiplies are dropped where rK surely holds 1 / w: after
+ * a line that set rK to the reciprocal of a register set to gl_FragCoord[3], and before the next write of rK, along
+ * lines that only fall through: unconditional instruction lines ("{ ... }"), predicated ones ("if (pN) { ... }", which
+ * forget what they may write; a predicated jump or discard only means the lines after it run on the other path), and
+ * the "if (go == 0u) {" / "}" around them, and a jump target ("if (go == N) go = 0u;") before any jump. A later jump
+ * target, a return or anything else forgets everything but an rK set before the first jump, up to its next write: with
+ * only forward jumps the lines run in text order, so every path from there has gone through that line. A loop ("for",
+ * "continue") forgets that too. The varying is then the value Vulkan interpolated, as on the console up to
+ * rounding; the same fold as Savage Wind's glsl_fold_ipa_w (-8 % ACO instructions there). */
 static int fold_reg_after(const char *p, const char *pre) {       /* "<pre>rN" at p: N, else -1 */
     size_t n = strlen(pre);
     if (strncmp(p, pre, n)) return -1;
@@ -1764,9 +1768,14 @@ static int fold_reg_after(const char *p, const char *pre) {       /* "<pre>rN" a
     if (*p != 'r' || p[1] < '0' || p[1] > '9') return -1;
     return atoi(p + 1);
 }
+static int fold_target(const char *line, size_t n) {          /* "if (go == N) go = 0u;": where a jump lands */
+    return n > 19 && !strncmp(line, "if (go == ", 10) && !strncmp(line + n - 9, " go = 0u;", 9);
+}
 static void fold_ipa_w(char *s, size_t *len) {
     unsigned char st[256];                                    /* 0 unknown, 1 gl_FragCoord.w, 2 1 / gl_FragCoord.w */
-    memset(st, 0, sizeof st);
+    unsigned char keep[256];                                  /* 1 / w on every path to here: set before any jump */
+    memset(st, 0, sizeof st); memset(keep, 0, sizeof keep);
+    int entry = 1;                                             /* no jump or jump target seen yet */
     char *w = s;
     for (char *line = s; *line;) {
         char *eol = strchr(line, '\n');
@@ -1774,10 +1783,24 @@ static void fold_ipa_w(char *s, size_t *len) {
         char *start = w;
         memmove(w, line, n); w += n;
         line += n;
-        if (start[0] != '{') { memset(st, 0, sizeof st); continue; }
-        start[w - start - (start[w - start - 1] == '\n')] = 0;  /* the line as a string while it is looked at */
+        size_t body = n - (eol != NULL);
+        if ((body == 1 && start[0] == '}') || (body == 15 && !strncmp(start, "if (go == 0u) {", 15))) continue;
+        if (entry && fold_target(start, body)) continue;       /* no jump to it yet */
+        int pred = !strncmp(start, "if (p", 5) || !strncmp(start, "if (!p", 6);
+        char last = start[body];
+        start[body] = 0;                                        /* the line as a string while it is looked at */
+        if ((start[0] != '{' && !pred) || strstr(start, "continue") || strstr(start, "break") || strstr(start, "return")) {
+            int fwd = fold_target(start, body) ||
+                      ((strstr(start, "return") || strstr(start, "break")) && !strstr(start, "continue") && !strstr(start, "for ("));
+            for (int r = 0; r < 256; r++) st[r] = (keep[r] &= fwd) ? 2 : 0;    /* a loop runs lines again: no more */
+            entry = 0;
+            start[body] = last;
+            continue;
+        }
+        if (strstr(start, "go = ")) entry = 0;
         int set = -1, kind = 0, k;
-        if ((k = fold_reg_after(start, "{ float f = F(U(gl_FragCoord[3])); ")) >= 0) { set = k; kind = 1; }
+        if (pred) {}
+        else if ((k = fold_reg_after(start, "{ float f = F(U(gl_FragCoord[3])); ")) >= 0) { set = k; kind = 1; }
         else if (!strncmp(start, "{ float f = (1.0 / (F(r", 23)) {
             int src = atoi(start + 23);
             const char *q = strstr(start, "))); ");
@@ -1791,19 +1814,127 @@ static void fold_ipa_w(char *s, size_t *len) {
                 memmove(m, m + cut, strlen(m + cut) + 1);
             } else m++;
         }
+        size_t kept = strlen(start);
         for (char *m = start; (m = strstr(m, " r"));) {          /* every register this line writes: "rN = " */
             m += 2;
             if (*m < '0' || *m > '9') continue;
             int r = atoi(m);
             while (*m >= '0' && *m <= '9') m++;
-            if (m[0] == ' ' && m[1] == '=' && m[2] != '=' && r < 256) st[r] = r == set ? (unsigned char)kind : 0;
+            if (m[0] == ' ' && m[1] == '=' && m[2] != '=' && r < 256) { st[r] = r == set ? (unsigned char)kind : 0; keep[r] = r == set && kind == 2 && entry; }
         }
-        size_t keep = strlen(start);
-        w = start + keep;
+        w = start + kept;
         if (eol) *w++ = '\n';
     }
     *w = 0;
     *len = (size_t)(w - s);
+}
+
+/* A 32-bit integer multiply has no single Maxwell instruction: the compiler emits three 16-bit XMADs for d = x * y
+ * (XMAD lo = x.lo * y.lo; XMAD.MRG m = (x.lo * y.hi).lo | y.lo << 16; XMAD.PSL.CBCC d = (x.hi * m.hi << 16) +
+ * (m << 16) + lo), often with other instructions in between. Translated one by one, ACO keeps the 16-bit pieces.
+ * The first XMAD may add a register z (d = x * y + z). Where the three are in one run of lines that only fall through
+ * ("{ ... }" or predicated, no jump, no target), the first two in either order, x is not written up to the third, y
+ * not before the first two are done, and lo and m not between their line and the third, the lo line also sets a new
+ * variable to x * y + z and the third takes it; lo and m keep their values for any other reader. Over the game's
+ * 27,888 stages: 46,423 such multiplies (nearly all in vertex stages), 45,631 of them folded. */
+#define XMAD_LO "{ uint prod = bitfieldExtract(r%u, 0, 16) * bitfieldExtract(r%u, 0, 16); uint res = prod + %4[0-9ru]; r%u = res; }%n"
+#define XMAD_MRG "{ uint prod = bitfieldExtract(r%u, 0, 16) * bitfieldExtract(r%u, 16, 16); uint res = prod + 0u; " \
+                 "res = (res & 0xffffu) | (r%u << 16); r%u = res; }%n"
+#define XMAD_PSL "{ uint prod = bitfieldExtract(r%u, 16, 16) * bitfieldExtract(r%u, 16, 16) << 16; uint res = prod + " \
+                 "((r%u << 16) + r%u); r%u = res; }%n"
+static int xmad_whole(const char *l, int n) { return n > 0 && (l[n] == '\n' || !l[n]); }
+static int xmad_has(const char *l, size_t len, const char *w) {      /* w within the len bytes at l */
+    size_t n = strlen(w);
+    for (size_t i = 0; i + n <= len; i++) if (!memcmp(l + i, w, n)) return 1;
+    return 0;
+}
+static int xmad_writes(const char *l, const char *end, unsigned r) {   /* does the line write "rR = "? */
+    for (const char *m = l; (m = strstr(m, " r")) && m < end;) {
+        m += 2;
+        if (*m < '0' || *m > '9') continue;
+        unsigned k = (unsigned)atoi(m);
+        while (*m >= '0' && *m <= '9') m++;
+        if (k == r && m[0] == ' ' && m[1] == '=' && m[2] != '=') return 1;
+    }
+    return 0;
+}
+static int xmad_lo(const char *l, unsigned *x, unsigned *y, int *z, unsigned *lo) {   /* z: the addend's register, -1 for 0u */
+    char add[5] = "";
+    int k = -1;
+    sscanf(l, XMAD_LO, x, y, add, lo, &k);
+    if (!xmad_whole(l, k)) return 0;
+    if (!strcmp(add, "0u")) *z = -1;
+    else if (add[0] == 'r' && add[1] >= '0' && add[1] <= '9') *z = atoi(add + 1);
+    else return 0;
+    return 1;
+}
+static void fold_xmad(Mx *e) {
+    size_t nl = 1, n = 0;
+    for (const char *c = e->s; *c; c++) nl += *c == '\n';
+    char **ls = malloc((nl + 1) * sizeof *ls);                   /* each line's start, and the end of the text */
+    int *fold = calloc(nl, sizeof *fold);                         /* lo line: 1 + the variable; third: -(1 + it) */
+    int *reg = calloc(nl * 3, sizeof *reg);                      /* lo line: x, y, addend (-1: none); third line: d */
+    for (char *c = e->s; *c; n++) { ls[n] = c; c = strchr(c, '\n'); c = c ? c + 1 : ls[n] + strlen(ls[n]); }
+    ls[n] = e->s + e->len;
+    int folds = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned x, y, lo = 0, m = 0, u, v, w, z, d;
+        int k = -1, add = -1, add2;
+        if (fold[i]) continue;                                     /* a line takes part in one fold at most */
+        size_t at_lo = i;                                          /* the lo line: the variable is set there */
+        int have_lo = xmad_lo(ls[i], &x, &y, &add, &lo), have_m = 0;
+        if (!have_lo) {
+            sscanf(ls[i], XMAD_MRG, &x, &y, &u, &m, &k);
+            if (!xmad_whole(ls[i], k) || u != y) continue;
+            have_m = 1;
+        }
+        if (x == y || (have_lo && (lo == x || lo == y)) || (have_m && (m == x || m == y))) continue;
+        for (size_t j = i + 1; j < n && j < i + 64; j++) {
+            const char *l = ls[j], *end = ls[j + 1];
+            size_t len = (size_t)(end - l);
+            if ((l[0] != '{' && strncmp(l, "if (p", 5) && strncmp(l, "if (!p", 6)) || xmad_has(l, len, "go = ") ||
+                xmad_has(l, len, "continue") || xmad_has(l, len, "break") || xmad_has(l, len, "return")) break;   /* not a fall-through line */
+            k = -1;
+            if (fold[j]) { /* in another fold: leave it */ }
+            else if (!have_lo) {
+                if (xmad_lo(l, &u, &v, &add2, &w) && u == x && v == y && w != x && w != y && w != m) { lo = w; add = add2; at_lo = j; have_lo = 1; continue; }
+            } else if (!have_m) {
+                sscanf(l, XMAD_MRG, &u, &v, &w, &z, &k);
+                if (xmad_whole(l, k) && u == x && v == y && w == y && z != x && z != lo) { m = z; have_m = 1; continue; }
+            } else {
+                sscanf(l, XMAD_PSL, &u, &v, &w, &z, &d, &k);
+                if (xmad_whole(l, k) && u == x && v == m && w == m && z == lo) {
+                    folds++;
+                    fold[at_lo] = folds; reg[at_lo * 3] = (int)x; reg[at_lo * 3 + 1] = (int)y; reg[at_lo * 3 + 2] = add;
+                    fold[j] = -folds; reg[j * 3] = (int)d;
+                    break;
+                }
+            }
+            if (xmad_writes(l, end, x) || (!(have_lo && have_m) && xmad_writes(l, end, y)) ||
+                (have_lo && xmad_writes(l, end, lo)) || (have_m && xmad_writes(l, end, m))) break;
+        }
+    }
+    if (folds) {
+        size_t cap = e->len + (size_t)folds * 48 + 1, o = 0;
+        char *out = malloc(cap);
+        for (size_t i = 0; i < n; i++) {
+            const char *l = ls[i], *end = ls[i + 1];
+            if (fold[i] < 0) {
+                o += (size_t)snprintf(out + o, cap - o, "{ r%d = xm%d; }%s", reg[i * 3], -fold[i] - 1, end[-1] == '\n' ? "\n" : "");
+                continue;
+            }
+            if (fold[i] > 0) {
+                int *r = reg + i * 3;
+                if (r[2] < 0) o += (size_t)snprintf(out + o, cap - o, "uint xm%d = r%d * r%d; ", fold[i] - 1, r[0], r[1]);
+                else o += (size_t)snprintf(out + o, cap - o, "uint xm%d = r%d * r%d + r%d; ", fold[i] - 1, r[0], r[1], r[2]);
+            }
+            memcpy(out + o, l, (size_t)(end - l)); o += (size_t)(end - l);
+        }
+        out[o] = 0;
+        free(e->s);
+        e->s = out; e->len = o; e->cap = cap;
+    }
+    free(ls); free(fold); free(reg);
 }
 
 int mx_translate(const MxIn *in, MxOut *out) {
@@ -1890,6 +2021,7 @@ int mx_translate(const MxIn *in, MxOut *out) {
     }
 
     if (in->stage == MX_FRAGMENT && in->target == 1 && e->s && !getenv("SMO_MX_NO_IPA_FOLD")) fold_ipa_w(e->s, &e->len);
+    if (in->target == 1 && e->s && !getenv("SMO_MX_NO_XMAD_FOLD")) fold_xmad(e);
     /* assemble: header, declarations, helpers, main */
     {
         Mx h;
